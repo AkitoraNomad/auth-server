@@ -1,108 +1,169 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" class="auth-html">
 
 <head>
-    <title>Registration</title>
+    <title>创建账户 · Auth Server</title>
+    <meta name="robots" content="noindex">
     {{template "head_common" .}}
-    <link href="https://cdn.bootcss.com/font-awesome/5.13.0/css/all.css" rel="stylesheet">
+    {{template "auth_head" .}}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 
-<body>
-{{template "navbar" .}}
-<main class="layout-main">
-<section class="section">
-    <div class="container">
-        <div class="columns is-centered">
-            <div class="column is-half">
-                <div id="msgDiv"></div>
-                <form action="/registration" method="POST" id="RegForm">
-                    <div class="field">
-                        <label class="label">邮箱地址</label>
-                        <div class="control has-icons-left">
-                            <input class="input" type="email" name="email" id="email"
-                                   placeholder="e.g. hello@example.com" required>
-                            <span class="icon is-small is-left">
+<body class="auth-body">
+    <main class="layout-main auth-main">
+        <div class="auth-shell">
+            <section class="card auth-card" aria-labelledby="auth-title">
+                <div class="card-content">
+                    <header class="auth-brand">
+                        <span class="auth-logo" aria-hidden="true">🐯</span>
+                        <div>
+                            <p class="auth-eyebrow">Auth Server</p>
+                            <h1 class="auth-title" id="auth-title">创建账户</h1>
+                        </div>
+                    </header>
+
+                    <p class="auth-subtitle">
+                        使用邮箱完成 Telegram 账户注册，之后即可登录授权服务器。
+                    </p>
+
+                    <div id="msgDiv" class="auth-msg" aria-live="polite"></div>
+
+                    <form action="/registration" method="POST" id="RegForm">
+                        <div class="field">
+                            <label class="label auth-label" for="email">邮箱地址</label>
+                            <div class="control has-icons-left">
+                                <input class="input auth-input" type="email" name="email" id="email"
+                                    placeholder="you@example.com" autocomplete="email" inputmode="email"
+                                    autocapitalize="none" spellcheck="false" required>
+                                <span class="icon is-small is-left">
                                     <i class="fas fa-envelope"></i>
                                 </span>
+                            </div>
                         </div>
-                    </div>
-                    <div class="cf-turnstile" data-sitekey="{{.site_key}}" data-callback="turnstileCallback"></div>
-                    <div class="field">
-                        <div class="control">
-                            <button type="submit" class="button is-primary" id="submitBtn" disabled>提交</button>
+
+                        <div class="auth-turnstile">
+                            <div class="cf-turnstile" data-sitekey="{{.site_key}}" data-theme="light"
+                                data-callback="turnstileCallback"
+                                data-error-callback="turnstileErrorCallback"
+                                data-expired-callback="turnstileExpiredCallback"></div>
                         </div>
-                    </div>
-                </form>
-            </div>
+                        <p class="auth-help">完成人机验证后即可继续。</p>
+
+                        <div class="field">
+                            <button type="submit" class="button is-primary is-fullwidth auth-submit"
+                                id="submitBtn" disabled>
+                                <span>继续</span>
+                                <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                            </button>
+                        </div>
+                    </form>
+
+                    <p class="auth-footnote">
+                        <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                        Protected by Cloudflare Turnstile
+                    </p>
+                </div>
+            </section>
         </div>
-    </div>
-    </section>
-</main>
-{{template "footer" .}}
-<script>
-    /**
-     * @type {string}
-     */
-    let cfToken = undefined;
-    /**
-     * @type {User}
-     */
-    let tgUser = undefined;
-    /**
-     * @param {string} token
-     */
-    window.turnstileCallback = function (token) {
-        console.log("verified", token);
-        cfToken = token;
-        document.getElementById("submitBtn").disabled = false;
-    };
+    </main>
 
-    document.getElementById("RegForm").addEventListener("submit", (e) => {
-        const form = e.target;
-        if (!form.checkValidity()) {
-            e.preventDefault();
-            return;
-        }
-        e.preventDefault();
+    {{template "auth_footer" .}}
 
-        const formData = {
-            provider_type: "Telegram",
-            cf_token: cfToken,
-            data: {
-                email: form.elements["email"].value
-            }
+    <script>
+        /** @type {string|undefined} */
+        let cfToken = undefined;
+
+        window.turnstileCallback = function (token) {
+            cfToken = token;
+            setSubmitDisabled(false);
+            clearErrorMessage();
         };
-        regReq(formData);
-    });
 
-    function regReq(body) {
-        return fetch("/registration", {
-            method: "POST",
-            body: JSON.stringify(body)
-        }).catch(e => {
-            console.log("reg err", e);
-            showErrorMessage("Network Error");
-        }).then(r => r.json()).then(j => {
-            if (j.code === 0) {
-                window.location.replace("/login");
-            } else {
-                console.error(j);
-                showErrorMessage(JSON.stringify(j));
+        window.turnstileErrorCallback = function () {
+            cfToken = undefined;
+            setSubmitDisabled(true);
+            showErrorMessage("验证失败，请刷新页面后重试。");
+        };
+
+        window.turnstileExpiredCallback = function () {
+            cfToken = undefined;
+            setSubmitDisabled(true);
+            showErrorMessage("验证已过期，请重新完成验证。");
+        };
+
+        function setSubmitDisabled(disabled) {
+            document.getElementById("submitBtn").disabled = disabled;
+        }
+
+        function clearErrorMessage() {
+            document.getElementById("msgDiv").replaceChildren();
+        }
+
+        function showErrorMessage(message) {
+            const container = document.getElementById("msgDiv");
+            container.replaceChildren();
+
+            const alert = document.createElement("div");
+            alert.className = "notification is-danger is-light auth-alert";
+            alert.setAttribute("role", "alert");
+
+            const close = document.createElement("button");
+            close.type = "button";
+            close.className = "delete";
+            close.setAttribute("aria-label", "关闭提示");
+            close.addEventListener("click", () => alert.remove());
+
+            alert.append(close, document.createTextNode(message));
+            container.append(alert);
+        }
+
+        document.getElementById("RegForm").addEventListener("submit", (event) => {
+            const form = event.target;
+            if (!form.checkValidity()) {
+                event.preventDefault();
+                return;
             }
+            event.preventDefault();
+            clearErrorMessage();
+
+            if (!cfToken) {
+                showErrorMessage("请先完成人机验证。");
+                return;
+            }
+
+            regReq({
+                provider_type: "Telegram",
+                cf_token: cfToken,
+                data: {
+                    email: form.elements["email"].value
+                }
+            });
         });
-    }
 
-    function showErrorMessage(message) {
-        document.getElementById("msgDiv").innerHTML = `
-        <div class="notification is-danger">
-            <button class="delete"></button>
-            ${message}
-        </div>
-        `
-    }
-
-</script>
+        function regReq(body) {
+            setSubmitDisabled(true);
+            return fetch("/registration", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            }).then(async response => {
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            }).then(payload => {
+                if (payload.code === 0) {
+                    window.location.replace("/login");
+                    return;
+                }
+                showErrorMessage("注册失败，请稍后重试。");
+            }).catch(() => {
+                showErrorMessage("网络错误，请稍后重试。");
+            }).finally(() => {
+                setSubmitDisabled(false);
+            });
+        }
+    </script>
 </body>
 
 </html>

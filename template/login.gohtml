@@ -1,113 +1,155 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en" class="auth-html">
 
 <head>
-    <title>Login</title>
+    <meta name="robots" content="noindex">
+    <title>Sign in · Auth Server</title>
     {{template "head_common" .}}
-    <link href="https://cdn.bootcss.com/font-awesome/5.13.0/css/all.css" rel="stylesheet">
+    {{template "auth_head" .}}
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 
-<body>
-    {{template "navbar" .}}
-    <main class="layout-main">
-        <div class="container">
-            <div class="columns is-centered">
-                <div class="column is-half">
-                    <div class="content">
-                        <h1>🐯 Login In {{.client_name}}</h1>
-                    </div>
-                    <div id="msgDiv"></div>
-                </div>
-            </div>
-            <div class="columns is-centered">
-                <div class="column is-half">
-                    <form action="/login" method="POST" id="loginForm" data-next-url="{{.next_url}}" data-request-id="{{.request_id}}">
+<body class="auth-body">
+    <main class="layout-main auth-main">
+        <div class="auth-shell">
+            <section class="card auth-card" aria-labelledby="auth-title">
+                <div class="card-content">
+                    <header class="auth-brand">
+                        <span class="auth-logo" aria-hidden="true">🐯</span>
+                        <div>
+                            <p class="auth-eyebrow">Auth Server</p>
+                            <h1 class="auth-title" id="auth-title">Welcome back</h1>
+                        </div>
+                    </header>
+
+                    <p class="auth-subtitle">
+                        Sign in to continue to <strong>{{.client_name}}</strong>.
+                    </p>
+
+                    <div id="msgDiv" class="auth-msg" aria-live="polite"></div>
+
+                    <form action="/login" method="POST" id="loginForm"
+                        data-next-url="{{.next_url}}" data-request-id="{{.request_id}}">
                         <div class="field">
-                            <label class="label" for="email">E-Mail</label>
+                            <label class="label auth-label" for="email">Email address</label>
                             <div class="control has-icons-left">
-                                <input class="input" type="email" name="email" id="email"
-                                    placeholder="e.g. hello@example.com" required>
+                                <input class="input auth-input" type="email" name="email" id="email"
+                                    placeholder="you@example.com" autocomplete="username" inputmode="email"
+                                    autocapitalize="none" spellcheck="false" required>
                                 <span class="icon is-small is-left">
                                     <i class="fas fa-envelope"></i>
                                 </span>
                             </div>
                         </div>
+
                         <div class="field">
-                            <p class="control has-icons-left">
-                                <input class="input" type="password" name="password" placeholder="Password">
+                            <label class="label auth-label" for="password">Password</label>
+                            <div class="control has-icons-left">
+                                <input class="input auth-input" type="password" name="password" id="password"
+                                    placeholder="Enter your password" autocomplete="current-password" required>
                                 <span class="icon is-small is-left">
                                     <i class="fas fa-lock"></i>
                                 </span>
-                            </p>
-                        </div>
-                        <div class="cf-turnstile" data-sitekey="{{.site_key}}" data-callback="turnstileCallback"></div>
-                        <div class="field">
-                            <div class="control">
-                                <button type="submit" class="button is-primary is-fullwidth" id="loginBtn"
-                                    disabled>Login
-                                </button>
                             </div>
                         </div>
+
+                        <div class="auth-turnstile">
+                            <div class="cf-turnstile" data-sitekey="{{.site_key}}" data-theme="light"
+                                data-callback="turnstileCallback"
+                                data-error-callback="turnstileErrorCallback"
+                                data-expired-callback="turnstileExpiredCallback"></div>
+                        </div>
+                        <p class="auth-help">Complete the verification to enable sign-in.</p>
+
                         <div class="field">
-                            <div class="control">
-                                <button type="button" class="button is-fullwidth" id="tgLoginBtn" disabled
-                                    onclick="toggleTelegramModal(true)">Login By Telegram
-                                </button>
-                            </div>
+                            <button type="submit" class="button is-primary is-fullwidth auth-submit"
+                                id="loginBtn" disabled>
+                                <span>Sign in</span>
+                                <i class="fas fa-arrow-right" aria-hidden="true"></i>
+                            </button>
+                        </div>
+
+                        <div class="auth-divider"><span>or</span></div>
+
+                        <div class="field">
+                            <button type="button" class="button is-fullwidth auth-secondary"
+                                id="tgLoginBtn" disabled onclick="toggleTelegramModal(true)">
+                                <i class="fab fa-telegram" aria-hidden="true"></i>
+                                Continue with Telegram
+                            </button>
                         </div>
                     </form>
+
+                    <p class="auth-footnote">
+                        <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                        Protected by Cloudflare Turnstile
+                    </p>
                 </div>
-            </div>
-            <div class="modal" id="telegramModal">
-                <div class="modal-background" onclick="toggleTelegramModal(false)"></div>
-                <div class="modal-content">
-                    <div class="card">
-                        <div class="card-content">
-                            <script async src="https://telegram.org/js/telegram-widget.js?22"
-                                data-telegram-login="{{.bot_name}}" data-size="large" data-onauth="onTelegramAuth(user)"
-                                data-request-access="write"></script>
-                        </div>
-                    </div>
-                </div>
-                <button class="modal-close is-large" aria-label="close" onclick="toggleTelegramModal(false)"></button>
-            </div>
+            </section>
         </div>
     </main>
-    {{template "footer" .}}
+
+    {{template "auth_footer" .}}
+
+    <div class="modal" id="telegramModal" aria-hidden="true">
+        <div class="modal-background" onclick="toggleTelegramModal(false)"></div>
+        <div class="modal-content">
+            <div class="card auth-modal-card">
+                <div class="card-content">
+                    <p class="auth-modal-title">Continue with Telegram</p>
+                    <p class="auth-modal-text">
+                        Authorize the Telegram bot to sign in. The verification above is required first.
+                    </p>
+                    <div class="auth-telegram-widget">
+                        <script async src="https://telegram.org/js/telegram-widget.js?22"
+                            data-telegram-login="{{.bot_name}}" data-size="large" data-onauth="onTelegramAuth(user)"
+                            data-request-access="write"></script>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button class="modal-close is-large" aria-label="Close Telegram dialog"
+            onclick="toggleTelegramModal(false)"></button>
+    </div>
 
     <script>
         /**
          * @typedef {Object} User
-         * @property {number} id - 用户的ID
-         * @property {string} email - 用户的邮箱
-         * @property {string} display_name - 用户的显示名称
-         * @property {string} [last_login_at] - 上次登录时间
+         * @property {number} id
+         * @property {string} email
+         * @property {string} display_name
+         * @property {string} [last_login_at]
          */
 
         /**
          * @typedef {Object} TelegramUser
-         * @property {string} first_name - 用户的名字
-         * @property {string} last_name - 用户的姓氏
-         * @property {number} id - 用户的ID
-         * @property {string} [username] - 用户的用户名（可选）
+         * @property {string} first_name
+         * @property {string} last_name
+         * @property {number} id
+         * @property {string} [username]
          */
 
-        /**
-         * @type {string}
-         */
+        /** @type {string|undefined} */
         let cfToken = undefined;
-        /**
-         * @type {TelegramUser}
-         */
+        /** @type {TelegramUser|undefined} */
         let tgUser = undefined;
 
-        /**
-         * @param {string} token
-         */
         window.turnstileCallback = function (token) {
             cfToken = token;
             setLoginBtnDisable(false);
+            clearErrorMessage();
+        };
+
+        window.turnstileErrorCallback = function () {
+            cfToken = undefined;
+            setLoginBtnDisable(true);
+            showErrorMessage("Verification failed. Please refresh and try again.");
+        };
+
+        window.turnstileExpiredCallback = function () {
+            cfToken = undefined;
+            setLoginBtnDisable(true);
+            showErrorMessage("Verification expired. Please complete it again.");
         };
 
         function setLoginBtnDisable(disabled) {
@@ -115,17 +157,35 @@
             document.getElementById('tgLoginBtn').disabled = disabled;
         }
 
+        function clearErrorMessage() {
+            document.getElementById('msgDiv').replaceChildren();
+        }
+
+        function showErrorMessage(message) {
+            const container = document.getElementById('msgDiv');
+            container.replaceChildren();
+
+            const alert = document.createElement('div');
+            alert.className = 'notification is-danger is-light auth-alert';
+            alert.setAttribute('role', 'alert');
+
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'delete';
+            close.setAttribute('aria-label', 'Dismiss error');
+            close.addEventListener('click', () => alert.remove());
+
+            alert.append(close, document.createTextNode(message));
+            container.append(alert);
+        }
+
         /**
          * @param {boolean} open
          */
         function toggleTelegramModal(open) {
-            const activeClassName = "is-active";
-            const m = document.getElementById("telegramModal");
-            if (open) {
-                m.classList.add(activeClassName);
-            } else {
-                m.classList.remove(activeClassName);
-            }
+            const modal = document.getElementById('telegramModal');
+            modal.classList.toggle('is-active', open);
+            modal.setAttribute('aria-hidden', String(!open));
         }
 
         /**
@@ -135,9 +195,10 @@
             tgUser = user;
             if (!cfToken) {
                 showErrorMessage("Please complete the Turnstile challenge first.");
-                document.getElementById("telegramModal").classList.remove("is-active");
+                toggleTelegramModal(false);
                 return;
             }
+
             const formData = {
                 provider_type: "Telegram",
                 cf_token: cfToken,
@@ -177,6 +238,7 @@
                 return;
             }
             event.preventDefault();
+            clearErrorMessage();
 
             const formData = {
                 provider_type: "EmailPassword",
@@ -195,7 +257,7 @@
                     if (payload.code !== 0) {
                         showErrorMessage("Login failed. Check your credentials and try again.");
                     } else if (!payload.data.user) {
-                        showErrorMessage("Invalid Credentials");
+                        showErrorMessage("Invalid credentials.");
                     } else {
                         handleRedirect(payload.data.user, payload.data.next_url);
                     }
@@ -216,20 +278,10 @@
                 }
                 return response.json();
             }).catch(() => {
-                showErrorMessage("Network Error");
+                showErrorMessage("Network error. Please try again.");
                 return null;
             });
         }
-
-        function showErrorMessage(message) {
-            document.getElementById("msgDiv").innerHTML = `
-        <div class="notification is-danger">
-            <button class="delete"></button>
-            ${message}
-        </div>
-        `
-        }
-
     </script>
 </body>
 

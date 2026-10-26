@@ -1,24 +1,35 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en" class="auth-html">
 
 <head>
-    <title>Authorize</title>
+    <title>Authorize access · Auth Server</title>
+    <meta name="robots" content="noindex">
     {{template "head_common" .}}
+    {{template "auth_head" .}}
 </head>
 
-<body>
-    {{template "navbar" .}}
-    <main class="layout-main">
-        <section class="section">
-            <div class="container">
-                <h1 class="title">Authorize</h1>
+<body class="auth-body">
+    <main class="layout-main auth-main">
+        <div class="auth-shell auth-shell--wide">
+            <section class="card auth-card" aria-labelledby="auth-title">
+                <div class="card-content">
+                    <header class="auth-brand">
+                        <span class="auth-logo" aria-hidden="true">🐯</span>
+                        <div>
+                            <p class="auth-eyebrow">Authorization request</p>
+                            <h1 class="auth-title" id="auth-title">Authorize access</h1>
+                        </div>
+                    </header>
 
-                {{if .error}}
-                <div class="notification is-danger">{{.error}}</div>
-                {{end}}
+                    <p class="auth-subtitle">
+                        <strong>{{.clientInfo.GetDisplayName}}</strong> is requesting access to your account.
+                    </p>
 
-                <div class="box">
-                    <form action="/oauth2/authorize" method="post" id="consentForm">
+                    {{if .error}}
+                    <div class="notification is-danger is-light auth-alert" role="alert">{{.error}}</div>
+                    {{end}}
+
+                    <form action="/oauth2/authorize" method="POST" id="consentForm">
                         <input type="hidden" name="consent" value="1">
                         <input type="hidden" name="request_id" value="{{.requestID}}">
                         <input type="hidden" name="client_id" value="{{.clientInfo.GetID}}">
@@ -28,36 +39,45 @@
                         <input type="hidden" name="code_challenge" value="{{.codeChallenge}}">
                         <input type="hidden" name="code_challenge_method" value="{{.codeChallengeMethod}}">
 
-                        <div class="content">
-                            <p><strong>{{.clientInfo.GetDisplayName}}</strong> is requesting the following scopes:</p>
-                        </div>
+                        <p class="auth-label">Permissions requested</p>
 
-                        <div class="columns is-multiline">
+                        <div class="auth-scope-list">
                             {{- range .scopeRequested }}
-                            <div class="column is-full">
-                                <label class="checkbox">
-                                    <input type="checkbox" name="consented" value="{{.GetName}}" {{if .IsDefault}}checked{{end}}>
-                                    <code>{{.GetName}}</code>
-                                    {{if .GetDescription}}— {{.GetDescription}}{{end}}
-                                </label>
-                            </div>
+                            <label class="auth-scope">
+                                <input type="checkbox" name="consented" value="{{.GetName}}" {{if .IsDefault}}checked{{end}}>
+                                <span>
+                                    <span class="auth-scope-name"><code>{{.GetName}}</code></span>
+                                    {{if .GetDescription}}
+                                    <span class="auth-scope-desc">{{.GetDescription}}</span>
+                                    {{end}}
+                                </span>
+                            </label>
                             {{- end }}
                         </div>
 
-                        <div class="field is-grouped mt-5">
-                            <div class="control">
-                                <button type="submit" class="button is-primary is-large">Allow</button>
-                            </div>
-                            <div class="control">
-                                <button type="submit" name="deny" value="1" class="button is-light is-large">Deny</button>
-                            </div>
+                        <p class="auth-scope-hint">Only the permissions you select will be granted.</p>
+
+                        <div class="auth-actions">
+                            <button type="submit" class="button is-primary auth-submit">
+                                <span>Allow access</span>
+                                <i class="fas fa-check" aria-hidden="true"></i>
+                            </button>
+                            <button type="submit" name="deny" value="1" class="button auth-deny">
+                                Deny
+                            </button>
                         </div>
                     </form>
+
+                    <p class="auth-footnote">
+                        <i class="fas fa-shield-alt" aria-hidden="true"></i>
+                        You can review and deny this request before continuing.
+                    </p>
                 </div>
-            </div>
-        </section>
+            </section>
+        </div>
     </main>
-    {{template "footer" .}}
+
+    {{template "auth_footer" .}}
 </body>
 
 </html>
