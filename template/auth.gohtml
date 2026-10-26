@@ -12,34 +12,44 @@
         <section class="section">
             <div class="container">
                 <h1 class="title">Authorize</h1>
+
+                {{if .error}}
+                <div class="notification is-danger">{{.error}}</div>
+                {{end}}
+
                 <div class="box">
-                    <form action="/oauth2/authorize" method="GET">
+                    <form action="/oauth2/authorize" method="post" id="consentForm">
+                        <input type="hidden" name="consent" value="1">
+                        <input type="hidden" name="request_id" value="{{.requestID}}">
                         <input type="hidden" name="client_id" value="{{.clientInfo.GetID}}">
+                        <input type="hidden" name="redirect_uri" value="{{.redirectURI}}">
                         <input type="hidden" name="response_type" value="{{.responseType}}">
-                        <input type="hidden" name="code_challenge_method" value="{{.codeChallengeMethod}}">
-                        <input type="hidden" name="code_challenge" value="{{.codeChallenge}}">
                         <input type="hidden" name="state" value="{{.state}}">
+                        <input type="hidden" name="code_challenge" value="{{.codeChallenge}}">
+                        <input type="hidden" name="code_challenge_method" value="{{.codeChallengeMethod}}">
 
                         <div class="content">
-                            <p>The {{.clientInfo.GetDisplayName}} is requesting following scopes:</p>
+                            <p><strong>{{.clientInfo.GetDisplayName}}</strong> is requesting the following scopes:</p>
                         </div>
 
                         <div class="columns is-multiline">
                             {{- range .scopeRequested }}
-                            <div
-                                class="column is-full-mobile is-half-tablet is-one-third-desktop is-one-quarter-widescreen">
+                            <div class="column is-full">
                                 <label class="checkbox">
-                                    <input type="checkbox" id="{{.GetName}}" name="consented" value="{{.GetName}}" {{if
-                                        .IsDefault}}checked readonly{{end}}>
-                                    {{.GetName}}
+                                    <input type="checkbox" name="consented" value="{{.GetName}}" {{if .IsDefault}}checked{{end}}>
+                                    <code>{{.GetName}}</code>
+                                    {{if .GetDescription}}— {{.GetDescription}}{{end}}
                                 </label>
                             </div>
                             {{- end }}
                         </div>
 
-                        <div class="field">
+                        <div class="field is-grouped mt-5">
                             <div class="control">
                                 <button type="submit" class="button is-primary is-large">Allow</button>
+                            </div>
+                            <div class="control">
+                                <button type="submit" name="deny" value="1" class="button is-light is-large">Deny</button>
                             </div>
                         </div>
                     </form>

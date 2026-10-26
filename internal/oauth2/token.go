@@ -1,18 +1,17 @@
 package oauth2
 
 import (
-	"auth-server/internal"
 	"auth-server/internal/model"
 	"context"
+	"fmt"
 
 	"github.com/go-oauth2/oauth2/v4"
 	"github.com/go-oauth2/oauth2/v4/generates"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 var tokenGenerator = map[model.TokenType]oauth2.AccessGenerate{
 	model.OpaqueToken: &generates.AccessGenerate{},
-	model.JWT:         generates.NewJWTAccessGenerate(internal.AuthServerConfig.JWT[0].Kid, []byte(internal.AuthServerConfig.JWT[0].Sec), jwt.SigningMethodRS256),
+	model.JWT:         NewJWTAccessGenerate(),
 }
 
 type ClientConfigTokenGenerate struct {
@@ -25,5 +24,9 @@ func (c *ClientConfigTokenGenerate) Token(ctx context.Context, data *oauth2.Gene
 	} else {
 		tokenType = model.OpaqueToken
 	}
-	return tokenGenerator[tokenType].Token(ctx, data, isGenRefresh)
+	generator, ok := tokenGenerator[tokenType]
+	if !ok || generator == nil {
+		return "", "", fmt.Errorf("unsupported token type: %s", tokenType.String())
+	}
+	return generator.Token(ctx, data, isGenRefresh)
 }

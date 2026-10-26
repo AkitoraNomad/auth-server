@@ -27,8 +27,9 @@ func (r *RSAKey) Alg() string {
 }
 
 func (r *RSAKey) ToJWK() map[string]string {
-	n := base64.URLEncoding.EncodeToString(r.PublicKey.N.Bytes())
-	e := base64.URLEncoding.EncodeToString(big.NewInt(int64(r.PublicKey.E)).Bytes())
+	// RFC 7517/7518 require unpadded base64url ("base64url" without '=').
+	n := base64.RawURLEncoding.EncodeToString(r.PublicKey.N.Bytes())
+	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(r.PublicKey.E)).Bytes())
 	return map[string]string{
 		"kty": "RSA",
 		"alg": r.Alg(),

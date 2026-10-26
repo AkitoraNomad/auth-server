@@ -1,73 +1,56 @@
-# React + TypeScript + Vite
+# Auth Server Admin SPA
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite 管理前端，入口固定在 `/admin-page/`。
 
-Currently, two official plugins are available:
+## 配置
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+复制 [.env.example](.env.example) 为 `.env`，不要提交真实密钥：
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+VITE_ADMIN_CLIENT_ID=2
+VITE_AUTH_BASE_URL=
+VITE_API_BASE_URL=
+VITE_ADMIN_REDIRECT_URI=
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- `VITE_ADMIN_CLIENT_ID` 必须等于后端 seed 的 BIGINT 管理客户端 ID（默认 2）。
+- `VITE_AUTH_BASE_URL`、`VITE_API_BASE_URL` 留空表示当前 origin。开发时 Vite 代理 `/oauth2`、`/login`、`/auth`、`/api` 到 `http://localhost:8080`。
+- 回调默认是 `<SPA origin>/admin-page/callback`，必须精确出现在后端 `ADMIN_CLIENT_REDIRECT_URIS` 中。
+- 这里**没有** `VITE_ADMIN_CLIENT_SECRET`：管理客户端是 public client，使用 S256 PKCE。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## 开发
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+pnpm install
+pnpm dev
 ```
+
+打开 `http://localhost:5173/admin-page/`。需要后端、PostgreSQL、Redis 和 Turnstile 配置；首位管理员通过 [../db/seed_admin.example.sql](../db/seed_admin.example.sql) 手工创建。
+
+开发端口固定为 5173，以便回调 URL 与后端精确匹配。若修改端口，需要同步修改后端 `ADMIN_CLIENT_REDIRECT_URIS` 和 `.env` 中的回调覆盖值。
+
+## 构建与检查
+
+```bash
+pnpm build
+pnpm lint
+```
+
+`dist/` 是独立静态产物。Go embed、Docker 打包和生产静态托管仍在项目 README 的 Phase 6。
+
+## 认证行为
+
+- Access/Refresh Token 只保存在内存，不写 `localStorage`；刷新页面会重新走授权服务器。
+- PKCE verifier/state、返回路径和创建时间保存在 `sessionStorage`，10 分钟后失效，成功后清除。
+- 回调会校验 state、防止重复兑换，并在兑换前从地址栏移除 code/state。
+- API 统一注入 Bearer；401 会尝试一次刷新，失败后回到登录页；403 显示权限不足。
+- 页面权限与服务端保持一致：用户/管理员/会话需要 `manage:system`，客户端需要 `manage:clients`。
+- 会话列表与强制撤销尚未实现（Phase 4），页面会明确标注，不会返回假成功。
+
+## 代理说明
+
+开发服务器代理以下路径到后端：
+
+`/oauth2`、`/login`、`/auth`、`/api`、`/registration`、`/userinfo`、`/introspect`、`/.well-known`
+
+`/admin-page/*` 由 Vite 自己提供，不能被代理到后端，否则 SPA 路由会失效。

@@ -3,14 +3,11 @@ package internal
 const PlaceholderFile = "placeholder.jpg"
 
 const (
-	SessionKeyUserID         = "LoggedInUserID"
-	SessionKeyClientID       = "ClientID"
-	SessionKeyScopeRequested = "scopeRequested"
-	SessionKeyScopeConsented = "scopeConsented"
-	SessionKeyResponseType   = "responseType"
-	SessionKeyTelegramData   = "telegramData"
-	SessionKeyState          = "state"
-	SessionKeyCodeChallenge  = "codeChallenge"
+	SessionKeyUserID                 = "LoggedInUserID"
+	SessionKeyConsentByRequest       = "consentByRequest"
+	SessionKeyTelegramData           = "telegramData"
+	SessionKeyAuthorizeRequests      = "authorizeRequests"
+	SessionKeyActiveAuthorizeRequest = "activeAuthorizeRequest"
 )
 
 const (
@@ -23,9 +20,4 @@ const (
 	PathRegistration = "/registration"
 	PathDiscovery    = "/.well-known/openid-configuration"
 	PathJwkSet       = "/.well-known/jwks.json"
-
-	PathAdminClients    = "/admin/client"
-	PathAdminClientNew  = "/admin/client/new"
-	PathAdminClientEdit = "/admin/client/edit"
-	PathAdminClientDel  = "/admin/client/delete"
 )

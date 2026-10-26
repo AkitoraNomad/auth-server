@@ -2,23 +2,25 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-const port = 8080
+const backend = process.env.BACKEND_URL || 'http://localhost:8080'
 
 export default defineConfig({
+  base: '/admin-page/',
   plugins: [tailwindcss(), react()],
   server: {
     host: true,
-    port: Number(process.env.VITE_PORT) || undefined,
-    allowedHosts: ['aki.internal', 'localhost'],
+    port: 5173,
+    strictPort: true,
+    allowedHosts: ['aki.internal', 'localhost', '127.0.0.1'],
     proxy: {
-      '/oauth2': `http://localhost:${port}`,
-      '/login': `http://localhost:${port}`,
-      '/auth': `http://localhost:${port}`,
-      '/api': `http://localhost:${port}`,
-      '/registration': `http://localhost:${port}`,
-      '/userinfo': `http://localhost:${port}`,
-      '/introspect': `http://localhost:${port}`,
-      '/.well-known': `http://localhost:${port}`,
+      '/oauth2': backend,
+      '/login': backend,
+      '/auth': backend,
+      '/api': backend,
+      '/registration': backend,
+      '/userinfo': backend,
+      '/introspect': backend,
+      '/.well-known': backend,
     },
   },
 })

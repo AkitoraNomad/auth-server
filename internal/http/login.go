@@ -7,12 +7,12 @@ import (
 	storeImpl "auth-server/internal/store"
 	"auth-server/internal/util"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
-
-	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-session/session/v3"
@@ -23,6 +23,7 @@ type loginReq struct {
 	LoginKey     string              `json:"login_key,omitempty"`
 	Data         json.RawMessage     `json:"data,omitempty"`
 	CfToken      string              `json:"cf_token,omitempty"`
+	RequestID    string              `json:"request_id,omitempty"`
 }
 
 func getLoginHandler() gin.HandlerFunc {
@@ -45,16 +46,41 @@ func getLoginHandler() gin.HandlerFunc {
 }
 
 func handleLoginPage(c *gin.Context, s session.Store) {
+	requestID := c.Query("request_id")
+	if requestID == "" {
+		requestID = activeAuthorizeRequestID(s)
+	}
+	state := findAuthorizeRequest(s, requestID)
+	if state == nil {
+		writeAuthorizeError(c.Writer, "invalid_request", "authorization request not found or expired")
+		return
+	}
+	setActiveAuthorizeRequest(s, state.ID)
+
+	nextURL := internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
 	if _, ok := s.Get(internal.SessionKeyUserID); ok {
-		c.Redirect(http.StatusFound, internal.PathAuth)
+		_ = s.Save()
+		c.Redirect(http.StatusFound, nextURL)
 		return
 	}
-	cid, ok := s.Get(internal.SessionKeyClientID)
-	if !ok {
-		c.String(http.StatusBadRequest, "invalid_request")
+
+	clientInfo, err := storeImpl.ClientRepo.GetByID(c.Request.Context(), state.ClientID)
+	if err != nil {
+		slog.Error("failed to load login client", "client_id", state.ClientID, "err", err)
+		c.String(http.StatusInternalServerError, "failed to get client info")
 		return
 	}
-	if err := renderLoginPage(c.Writer, cid.(string), http.StatusUnauthorized, nil); err != nil {
+	client, ok := clientInfo.(*model.AuthClient)
+	if !ok || client == nil {
+		writeAuthorizeError(c.Writer, "invalid_request", "unknown client")
+		return
+	}
+
+	if err := s.Save(); err != nil {
+		c.String(http.StatusInternalServerError, "failed to save session")
+		return
+	}
+	if err := renderLoginPage(c.Writer, client.DisplayName, nextURL, state.ID, http.StatusUnauthorized, nil); err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 	}
 }
@@ -92,11 +118,17 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 0, map[string]any{"user": nil})
 		return
 	}
-	var clientID string
-	if cid, ok := s.Get(internal.SessionKeyClientID); ok {
-		if v, ok := cid.(string); ok {
-			clientID = v
-		}
+
+	clientID := ""
+	nextURL := ""
+	requestID := req.RequestID
+	if requestID == "" {
+		requestID = activeAuthorizeRequestID(s)
+	}
+	if state := findAuthorizeRequest(s, requestID); state != nil {
+		clientID = state.ClientID
+		nextURL = internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
+		setActiveAuthorizeRequest(s, state.ID)
 	}
 	sessionUser := model.NewSessionUserInfo(userInfo, req.ProviderType, remoteIp, clientID, time.Now(), map[string]any{
 		"login_key": req.LoginKey,
@@ -106,7 +138,10 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 1, err)
 		return
 	}
-	responseJson(c.Writer, 0, map[string]any{"user": sessionUser.User})
+	responseJson(c.Writer, 0, map[string]any{
+		"user":     sessionUser.User,
+		"next_url": nextURL,
+	})
 }
 
 func getIp(r *http.Request) string {
@@ -118,9 +153,11 @@ func getIp(r *http.Request) string {
 	return remoteIp
 }
 
-func renderLoginPage(w http.ResponseWriter, clientName string, code int, err error) error {
+func renderLoginPage(w http.ResponseWriter, clientName, nextURL, requestID string, code int, err error) error {
 	data := map[string]any{
 		"client_name": clientName,
+		"next_url":    nextURL,
+		"request_id":  requestID,
 		"site_key":    internal.AuthServerConfig.Cloudflare.Turnstile.Key,
 		"bot_name":    internal.AuthServerConfig.Telegram.BotName,
 	}

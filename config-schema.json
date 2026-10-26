@@ -1,35 +1,32 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "description": "Configuration for server.",
+  "description": "Configuration for the auth server.",
   "type": "object",
   "properties": {
     "host": {
       "type": "string",
-      "description": "The hostname or IP address where the application server is running."
+      "description": "The hostname or IP address where the application server listens."
     },
     "port": {
       "type": "integer",
-      "description": "The port number on which the application server listens for incoming connections."
+      "description": "The port on which the application server listens."
+    },
+    "issuer": {
+      "type": "string",
+      "description": "Public issuer URL used by Discovery and JWT iss. Defaults to http://<host>:<port>; override OAUTH_ISSUER in production."
     },
     "redis": {
       "type": "object",
       "properties": {
-        "host": {
-          "type": "string"
-        },
-        "port": {
-          "type": "string"
-        }
+        "host": { "type": "string" },
+        "port": { "type": "string" }
       },
-      "required": [
-        "host",
-        "port"
-      ],
-      "description": "Configuration settings for connecting to a Redis server."
+      "required": ["host", "port"],
+      "description": "Redis connection used for sessions and token storage."
     },
     "db": {
       "type": "string",
-      "description": "The connection string or identifier for the application's primary database."
+      "description": "PostgreSQL DSN. Include search_path=auth."
     },
     "jwt": {
       "type": "array",
@@ -38,32 +35,67 @@
         "properties": {
           "kid": {
             "type": "string",
-            "description": "A unique identifier for the JWT key (Key ID)."
+            "description": "Key identifier."
           },
           "alg": {
             "type": "string",
-            "description": "The algorithm used to sign the JWT (e.g., HS256, RS256)."
+            "description": "Signing algorithm (RS256 is required for the management JWT)."
           },
           "sec": {
             "type": "string",
-            "description": "The secret key used for signing the JWT, specific to the key identified by 'kid'."
+            "description": "Private key or secret."
           }
         },
-        "required": [
-          "kid",
-          "alg",
-          "sec"
-        ],
-        "description": "Configuration for a set of JWT keys used for authentication and token management."
+        "required": ["kid", "alg", "sec"]
+      }
+    },
+    "admin": {
+      "type": "object",
+      "description": "First-party management client. The server owns and idempotently updates this row on startup.",
+      "properties": {
+        "client-id": {
+          "type": "integer",
+          "description": "Fixed BIGINT auth_client id (default 2). Must match VITE_ADMIN_CLIENT_ID."
+        },
+        "display-name": { "type": "string" },
+        "redirect-uris": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Exact allowed redirect URIs. Production should use HTTPS."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Management scopes allowed for the client; must include at least one manage:* scope."
+        },
+        "grant-types": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Only authorization_code and refresh_token are allowed for the management client."
+        }
+      }
+    },
+    "cloudflare": {
+      "type": "object",
+      "properties": {
+        "turnstile": {
+          "type": "object",
+          "properties": {
+            "key": { "type": "string" },
+            "secret": { "type": "string" }
+          },
+          "required": ["key", "secret"]
+        }
       },
-      "description": "A list of configurations for JWT authentication, allowing multiple keys and algorithms."
+      "description": "Turnstile is required by the login and registration handlers."
+    },
+    "telegram": {
+      "type": "object",
+      "properties": {
+        "bot-name": { "type": "string" },
+        "bot-token": { "type": "string" }
+      }
     }
   },
-  "required": [
-    "host",
-    "port",
-    "redis",
-    "db",
-    "jwt"
-  ]
+  "required": ["host", "port", "redis", "db", "jwt"]
 }

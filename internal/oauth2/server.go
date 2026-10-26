@@ -55,10 +55,24 @@ func InitServer() *server.Server {
 		ForcePKCE: true,
 	}
 	srv := server.NewServer(&oauth2ServerConfig, manager)
+	srv.SetClientInfoHandler(clientInfoHandler)
+	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
+	srv.SetClientScopeHandler(clientScopeHandler)
+	srv.SetRefreshingScopeHandler(refreshingScopeHandler)
 	srv.SetUserAuthorizationHandler(userAuthorizeHandler)
 	srv.SetAuthorizeScopeHandler(scopeHandler)
 	srv.SetResponseTokenHandler(getResponseTokenHandler(manager))
 	srv.SetInternalErrorHandler(func(err error) (re *errors.Response) {
+		// go-oauth2 does not put ErrInvalidRedirectURI in its public
+		// descriptions map, which would otherwise turn a token request with a
+		// mismatched redirect_uri into an opaque 500 server_error.
+		if err == errors.ErrInvalidRedirectURI {
+			return &errors.Response{
+				Error:       errors.ErrInvalidGrant,
+				Description: errors.Descriptions[errors.ErrInvalidGrant],
+				StatusCode:  http.StatusBadRequest,
+			}
+		}
 		slog.Error("Internal Error", "err", err)
 		return
 	})
@@ -132,19 +146,29 @@ func scopeHandler(w http.ResponseWriter, r *http.Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	consented, ok := s.Get(internal.SessionKeyScopeConsented)
-	if !ok {
+	requestID := r.FormValue("request_id")
+	if requestID == "" {
+		return "", errors.New("failed to get authorize request id")
+	}
+	raw, ok := s.Get(internal.SessionKeyConsentByRequest)
+	if !ok || raw == nil {
 		return "", errors.New("failed to get scope")
 	}
-	var scopeName []string
-	consentedScopes, err := util.Decode[[]*model.Scope](consented)
-	if err != nil {
-		return "", err
+	var consents map[string][]string
+	if typed, ok := raw.(map[string][]string); ok {
+		consents = typed
+	} else {
+		decoded, err := util.Decode[map[string][]string](raw)
+		if err != nil {
+			return "", err
+		}
+		consents = decoded
 	}
-	for _, scopeInfo := range consentedScopes {
-		scopeName = append(scopeName, scopeInfo.Name)
+	names := consents[requestID]
+	if len(names) == 0 {
+		return "", errors.New("failed to get scope")
 	}
-	return strings.Join(scopeName, " "), nil
+	return strings.Join(names, " "), nil
 }
 
 func getResponseTokenHandler(manager oauth2.Manager) server.ResponseTokenHandler {
@@ -154,9 +178,13 @@ func getResponseTokenHandler(manager oauth2.Manager) server.ResponseTokenHandler
 			ti, err := manager.LoadAccessToken(context.Background(), ts)
 			if err == nil {
 				userId := ti.GetUserID()
-				slog.Info("access token generated", "user_id", userId)
-				// update user last login time
-				updateUserLastLogin(userId)
+				if userId != "" {
+					slog.Info("access token generated", "user_id", userId)
+					// update user last login time for user-bound tokens only
+					updateUserLastLogin(userId)
+				} else {
+					slog.Debug("client credentials access token generated")
+				}
 			} else {
 				slog.Warn("failed to load access token after gen token", "err", err)
 			}

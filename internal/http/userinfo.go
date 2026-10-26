@@ -13,36 +13,36 @@ func getUserinfoHandler(srv *server.Server) http.HandlerFunc {
 
 		username, password, ok := r.BasicAuth()
 		if !ok {
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request", "error_description": "Missing client authentication"})
 			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request", "error_description": "Missing client authentication"})
 			return
 		}
 
 		cli, err := srv.Manager.GetClient(r.Context(), username)
 		if err != nil {
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client", "error_description": "AuthClient authentication failed"})
 			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client", "error_description": "AuthClient authentication failed"})
 			return
 		}
 
 		if cli.GetSecret() != password {
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client", "error_description": "AuthClient authentication failed"})
 			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_client", "error_description": "AuthClient authentication failed"})
 			return
 		}
 
 		_ = r.ParseMultipartForm(1 << 20)
 		token := r.PostForm.Get("token")
 		if token == "" {
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request", "error_description": "Token parameter is missing"})
 			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request", "error_description": "Token parameter is missing"})
 			return
 		}
 
 		ti, err := srv.Manager.LoadAccessToken(r.Context(), token)
 		if err != nil {
-			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_token", "error_description": "Token is invalid or expired"})
 			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "invalid_token", "error_description": "Token is invalid or expired"})
 			return
 		}
 

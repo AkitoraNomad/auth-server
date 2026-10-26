@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -32,8 +34,16 @@ type Config struct {
 	} `yaml:"redis"`
 	DB           string      `yaml:"db"`
 	DBSearchPath string      `yaml:"db-search-path"`
+	Issuer       string      `yaml:"issuer"`
 	JWT          []JWTConfig `yaml:"jwt"`
-	Cloudflare   struct {
+	Admin        struct {
+		ClientID     int64    `yaml:"client-id"`
+		DisplayName  string   `yaml:"display-name"`
+		RedirectURIs []string `yaml:"redirect-uris"`
+		Scopes       []string `yaml:"scopes"`
+		GrantTypes   []string `yaml:"grant-types"`
+	} `yaml:"admin"`
+	Cloudflare struct {
 		Turnstile struct {
 			Key    string `yaml:"key"`
 			Secret string `yaml:"secret"`
@@ -97,7 +107,7 @@ func setDefaultValues() {
 		privateKey, err := rsa.GenerateKey(rand.Reader, keySize)
 		if err != nil {
 			slog.Error("failed to generate RSA keys", "err", err)
-		panic("failed to generate RSA keys")
+			panic("failed to generate RSA keys")
 		}
 		privateKeyPEM := pem.EncodeToMemory(&pem.Block{
 			Type:  "RSA PRIVATE KEY",
@@ -113,10 +123,80 @@ func setDefaultValues() {
 			},
 		}
 	}
+	setAdminDefaults()
+	applyAdminEnvOverrides()
+
 	if AuthServerConfig.Cloudflare.Turnstile.Key == "" || AuthServerConfig.Cloudflare.Turnstile.Secret == "" {
 		slog.Error("Cloudflare Turnstile is not configured")
 		panic("Cloudflare Turnstile un-config")
 	}
+}
+
+func setAdminDefaults() {
+	issuerHost := AuthServerConfig.Host
+	if issuerHost == "" || issuerHost == "0.0.0.0" || issuerHost == "::" {
+		issuerHost = "localhost"
+	}
+	if AuthServerConfig.Issuer == "" {
+		AuthServerConfig.Issuer = fmt.Sprintf("http://%s:%d", issuerHost, AuthServerConfig.Port)
+	}
+	if AuthServerConfig.Admin.ClientID == 0 {
+		// The administrator SPA has historically used the numeric client id 2.
+		// It remains a BIGINT (no string client key); the server owns this row.
+		AuthServerConfig.Admin.ClientID = 2
+	}
+	if AuthServerConfig.Admin.DisplayName == "" {
+		AuthServerConfig.Admin.DisplayName = "Auth Server Admin"
+	}
+	if len(AuthServerConfig.Admin.RedirectURIs) == 0 {
+		AuthServerConfig.Admin.RedirectURIs = []string{
+			"http://localhost:5173/admin-page/callback",
+			"http://127.0.0.1:5173/admin-page/callback",
+		}
+	}
+	if len(AuthServerConfig.Admin.Scopes) == 0 {
+		AuthServerConfig.Admin.Scopes = []string{"manage:system", "manage:clients"}
+	}
+	if len(AuthServerConfig.Admin.GrantTypes) == 0 {
+		AuthServerConfig.Admin.GrantTypes = []string{"authorization_code", "refresh_token"}
+	}
+}
+
+func applyAdminEnvOverrides() {
+	if v := strings.TrimSpace(os.Getenv("OAUTH_ISSUER")); v != "" {
+		AuthServerConfig.Issuer = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_ID")); v != "" {
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || id <= 0 {
+			slog.Error("invalid ADMIN_CLIENT_ID", "value", v)
+			panic("ADMIN_CLIENT_ID must be a positive integer")
+		}
+		AuthServerConfig.Admin.ClientID = id
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_DISPLAY_NAME")); v != "" {
+		AuthServerConfig.Admin.DisplayName = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_REDIRECT_URIS")); v != "" {
+		AuthServerConfig.Admin.RedirectURIs = splitCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_SCOPES")); v != "" {
+		AuthServerConfig.Admin.Scopes = splitCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_GRANT_TYPES")); v != "" {
+		AuthServerConfig.Admin.GrantTypes = splitCSV(v)
+	}
+}
+
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func resolveEnv(cfg *Config) {

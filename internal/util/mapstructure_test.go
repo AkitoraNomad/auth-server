@@ -8,7 +8,7 @@ import (
 )
 
 func Test1(t *testing.T) {
-  j := `
+	j := `
 	{
     "user": {
       "id": 2,

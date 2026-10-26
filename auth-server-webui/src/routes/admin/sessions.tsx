@@ -1,59 +1,94 @@
 import { useEffect, useState } from 'react'
-import { api } from '../../lib/api'
-import type { SessionInfo } from '../../types'
+import { api, errorMessage } from '../../lib/api'
+import type { User } from '../../types'
+import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 
 export default function SessionsPage() {
-  const [sessions, setSessions] = useState<SessionInfo[]>([])
+  const [users, setUsers] = useState<User[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
 
-  const loadSessions = async () => {
-    try {
-      const data = await api.getSessions()
-      setSessions(data)
-    } catch (err) {
-      console.error(err)
-    } finally {
-      setLoading(false)
+  useEffect(() => {
+    let active = true
+    api
+      .getSessions()
+      .then((data) => {
+        if (active) {
+          setUsers(data)
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) {
+          setError(errorMessage(err))
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setLoading(false)
+        }
+      })
+    return () => {
+      active = false
     }
+  }, [reloadKey])
+
+  const reload = () => {
+    setLoading(true)
+    setError(null)
+    setReloadKey((key) => key + 1)
   }
-
-  useEffect(() => { loadSessions() }, [])
-
-  const handleRevoke = async (userId: number) => {
-    if (!confirm('Revoke all sessions for this user?')) return
-    await api.revokeSession(userId)
-    await loadSessions()
-  }
-
-  if (loading) return <span className="loading loading-spinner loading-lg" />
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-4">Sessions</h1>
-      <div className="overflow-x-auto">
-        <table className="table">
-          <thead>
-            <tr>
-              <th>User ID</th>
-              <th>Email</th>
-              <th>Display Name</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sessions.map((s) => (
-              <tr key={s.user_id}>
-                <td>{s.user_id}</td>
-                <td>{s.email}</td>
-                <td>{s.display_name}</td>
-                <td>
-                  <button className="btn btn-warning btn-xs" onClick={() => handleRevoke(s.user_id)}>Revoke</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="mb-4">
+        <h1 className="text-2xl font-bold">Sessions</h1>
+        <p className="text-sm text-base-content/60">
+          A real active-token/session index is planned for Phase 4. Until then this page only shows
+          user records, and revoke is intentionally unavailable rather than returning a false success.
+        </p>
       </div>
+
+      <div className="alert alert-info mb-4">
+        <span>Session listing and forced revocation are not implemented in Phase 1.</span>
+      </div>
+
+      {error && <ErrorAlert message={error} onRetry={reload} />}
+
+      {loading ? (
+        <LoadingBlock />
+      ) : users.length === 0 ? (
+        <EmptyState title="No users" description="There are no user records to display." />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="table table-zebra">
+            <thead>
+              <tr>
+                <th>User ID</th>
+                <th>Email</th>
+                <th>Display Name</th>
+                <th>Last Login</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((user) => (
+                <tr key={user.id}>
+                  <td>{user.id}</td>
+                  <td>{user.email}</td>
+                  <td>{user.display_name || '-'}</td>
+                  <td>{user.last_login_at || '-'}</td>
+                  <td>
+                    <button className="btn btn-xs" disabled title="Session revocation is planned for Phase 4">
+                      Revoke
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

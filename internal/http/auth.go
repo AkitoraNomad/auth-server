@@ -19,59 +19,43 @@ func getAuthHandler() http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		uVal, ok := s.Get(internal.SessionKeyUserID)
-		if !ok {
-			w.Header().Set("Location", internal.PathLogin)
-			w.WriteHeader(http.StatusFound)
+
+		requestID := r.URL.Query().Get("request_id")
+		state := findAuthorizeRequest(s, requestID)
+		if state == nil {
+			writeAuthorizeError(w, "invalid_request", "authorization request not found or expired")
 			return
 		}
-		if _, ok := s.Get(internal.SessionKeyScopeConsented); ok {
-			w.Header().Set("Location", internal.PathAuthorize)
-			w.WriteHeader(http.StatusFound)
+		if _, ok := s.Get(internal.SessionKeyUserID); !ok {
+			redirectToLogin(w, r, state.ID)
 			return
 		}
 
-		cID, ok := s.Get(internal.SessionKeyClientID)
-		if !ok {
-			http.Error(w, "failed to get client id", http.StatusInternalServerError)
-			return
-		}
-
-		clientInfo, err := storeImpl.ClientRepo.GetByID(r.Context(), cID.(string))
+		clientInfo, err := storeImpl.ClientRepo.GetByID(r.Context(), state.ClientID)
 		if err != nil {
+			slog.Error("failed to load consent client", "client_id", state.ClientID, "err", err)
 			http.Error(w, "failed to get client info", http.StatusInternalServerError)
 			return
 		}
-		data := map[string]any{}
+		client, ok := clientInfo.(*model.AuthClient)
+		if !ok || client == nil {
+			writeAuthorizeError(w, "invalid_request", "unknown client")
+			return
+		}
 
-		if rt, ok := s.Get(internal.SessionKeyResponseType); !ok {
-			http.Error(w, "failed to get response type", http.StatusInternalServerError)
+		scopes := model.ParseScopeNames(state.Scope)
+		if len(scopes) != len(state.Scope) {
+			writeAuthorizeError(w, "invalid_scope", "the requested scopes are no longer available")
 			return
-		} else {
-			data["responseType"] = rt
 		}
-		if sci, ok := clientInfo.(model.ScopedClientInfo); ok {
-			data["clientInfo"] = sci
-		}
-		scopes, ok := s.Get(internal.SessionKeyScopeRequested)
+
+		uVal, ok := s.Get(internal.SessionKeyUserID)
 		if !ok {
-			http.Error(w, "failed to get requested scope", http.StatusInternalServerError)
+			redirectToLogin(w, r, state.ID)
 			return
 		}
-		scopeList, err := util.Decode[[]*model.Scope](scopes)
-		if err != nil {
-			http.Error(w, "failed to parse scopes", http.StatusInternalServerError)
-			return
-		}
-		var scopeInfos []model.ScopeInfo
-		for _, s := range scopeList {
-			scopeInfos = append(scopeInfos, s)
-		}
-		data["scopeRequested"] = scopeInfos
-		// inject user info into template
 		var sessionUser *model.SessionUserInfo
 		if v, ok := uVal.(map[string]any); ok {
-			var err error
 			sessionUser, err = util.MapToStruct[*model.SessionUserInfo](v)
 			if err != nil {
 				http.Error(w, "failed to parse session user info", http.StatusInternalServerError)
@@ -81,19 +65,25 @@ func getAuthHandler() http.HandlerFunc {
 			http.Error(w, "invalid session user info type", http.StatusInternalServerError)
 			return
 		}
-		data["user"] = sessionUser.User
-		data["sessionUser"] = sessionUser
-		data["codeChallengeMethod"] = "S256"
 
-		if state, ok := s.Get(internal.SessionKeyState); ok {
-			data["state"] = state
+		setActiveAuthorizeRequest(s, state.ID)
+		_ = s.Save()
+
+		data := map[string]any{
+			"clientInfo":          client,
+			"responseType":        state.ResponseType,
+			"scopeRequested":      scopes,
+			"user":                sessionUser.User,
+			"sessionUser":         sessionUser,
+			"state":               state.State,
+			"codeChallenge":       state.CodeChallenge,
+			"codeChallengeMethod": state.CodeChallengeMethod,
+			"redirectURI":         state.RedirectURI,
+			"requestID":           state.ID,
+			"error":               r.URL.Query().Get("error"),
 		}
-		if cc, ok := s.Get(internal.SessionKeyCodeChallenge); ok {
-			data["codeChallenge"] = cc
-		}
 
-		slog.Debug("rendering consent page", "client_id", cID, "scopes_count", len(scopeInfos))
-
-		_ = render.Html(w, "auth.gohtml", 200, data)
+		slog.Debug("rendering consent page", "client_id", state.ClientID, "scopes_count", len(scopes))
+		_ = render.Html(w, "auth.gohtml", http.StatusOK, data)
 	}
 }

@@ -3,12 +3,14 @@ package http
 import (
 	"auth-server/internal"
 	"auth-server/internal/http/admin"
+	"auth-server/internal/model"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -36,11 +38,6 @@ func CreateGinEngine(srv *server.Server) *gin.Engine {
 
 	// keep previous session expiration behavior (15 minutes)
 	session.SetExpired(15 * 60)
-	r.Use(func(c *gin.Context) {
-		// touch session to ensure middleware order doesn't break later usage
-		// (lazy start in handlers still works; this is a placeholder for future auth middleware)
-		c.Next()
-	})
 
 	// Root & static placeholder
 	r.GET("/", gin.WrapF(indexHandler))
@@ -60,36 +57,28 @@ func CreateGinEngine(srv *server.Server) *gin.Engine {
 	r.GET(internal.PathRegistration, gin.WrapF(getRegistrationHandler(srv)))
 	r.POST(internal.PathRegistration, gin.WrapF(getRegistrationHandler(srv)))
 
-	// Admin routes
-	adminGroup := r.Group("/admin")
-	{
-		adminGroup.GET("/client", gin.WrapF(admin.GetClients()))
-		adminGroup.POST("/client/new", gin.WrapF(admin.PostClientNew()))
-		adminGroup.POST("/client/del", gin.WrapF(admin.PostClientDel()))
-
-		adminGroup.GET("/accounts", gin.WrapF(admin.GetAccounts()))
-		adminGroup.POST("/accounts/new", gin.WrapF(admin.PostAccountNew()))
-		adminGroup.POST("/accounts/del", gin.WrapF(admin.PostAccountDel()))
-	}
-
-	// Admin JSON API (JWT Bearer token protected)
+	// Admin JSON API. RequireAdmin verifies the JWT, the management client, the
+	// Redis revocation state and auth_admin membership. Each route then enforces
+	// its own management scope.
 	apiAdmin := r.Group("/api/admin")
-	apiAdmin.Use(admin.AuthMiddleware(srv.Manager))
+	apiAdmin.Use(admin.RequireAdmin(srv.Manager))
 	{
-		apiAdmin.GET("/users", admin.GetUsersAPI())
-		apiAdmin.POST("/users", admin.PostUserAPI())
-		apiAdmin.DELETE("/users/:id", admin.DeleteUserAPI())
+		apiAdmin.GET("/me", admin.GetMeAPI())
 
-		apiAdmin.GET("/clients", admin.GetClientsAPI())
-		apiAdmin.POST("/clients", admin.PostClientAPI())
-		apiAdmin.DELETE("/clients/:id", admin.DeleteClientAPI())
+		apiAdmin.GET("/users", admin.RequireScope(model.ScopeManageSystem), admin.GetUsersAPI())
+		apiAdmin.POST("/users", admin.RequireScope(model.ScopeManageSystem), admin.PostUserAPI())
+		apiAdmin.DELETE("/users/:id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteUserAPI())
 
-		apiAdmin.GET("/admins", admin.GetAdminsAPI())
-		apiAdmin.POST("/admins", admin.PostAdminAPI())
-		apiAdmin.DELETE("/admins/:user_id", admin.DeleteAdminAPI())
+		apiAdmin.GET("/clients", admin.RequireScope(model.ScopeManageClients), admin.GetClientsAPI())
+		apiAdmin.POST("/clients", admin.RequireScope(model.ScopeManageClients), admin.PostClientAPI())
+		apiAdmin.DELETE("/clients/:id", admin.RequireScope(model.ScopeManageClients), admin.DeleteClientAPI())
 
-		apiAdmin.GET("/sessions", admin.GetSessionsAPI(srv.Manager))
-		apiAdmin.DELETE("/sessions/:user_id", admin.DeleteSessionAPI(srv.Manager))
+		apiAdmin.GET("/admins", admin.RequireScope(model.ScopeManageSystem), admin.GetAdminsAPI())
+		apiAdmin.POST("/admins", admin.RequireScope(model.ScopeManageSystem), admin.PostAdminAPI())
+		apiAdmin.DELETE("/admins/:user_id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteAdminAPI())
+
+		apiAdmin.GET("/sessions", admin.RequireScope(model.ScopeManageSystem), admin.GetSessionsAPI(srv.Manager))
+		apiAdmin.DELETE("/sessions/:user_id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteSessionAPI(srv.Manager))
 	}
 
 	// 404 fallback
@@ -118,7 +107,7 @@ func ginSlogLogger() gin.HandlerFunc {
 			errMsg = c.Errors.String()
 		}
 		if rawQuery != "" {
-			path = path + "?" + rawQuery
+			path = path + "?" + sanitizeQuery(rawQuery)
 		}
 		level := slog.LevelInfo
 		if status >= 500 {
@@ -161,4 +150,32 @@ func compactUA(ua string) (short string, hash string, length int) {
 		short = ua
 	}
 	return
+}
+
+var sensitiveQueryKeys = map[string]struct{}{
+	"state":          {},
+	"code":           {},
+	"code_challenge": {},
+	"code_verifier":  {},
+	"access_token":   {},
+	"refresh_token":  {},
+	"token":          {},
+	"client_secret":  {},
+	"password":       {},
+	"cf_token":       {},
+}
+
+// sanitizeQuery keeps useful routing/debug parameters while redacting values
+// that must not be written to logs (state, PKCE material, credentials/tokens).
+func sanitizeQuery(rawQuery string) string {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "[unparseable query redacted]"
+	}
+	for key := range sensitiveQueryKeys {
+		if values.Has(key) {
+			values.Set(key, "[redacted]")
+		}
+	}
+	return values.Encode()
 }

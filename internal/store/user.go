@@ -133,6 +133,7 @@ func (m *DbUserStore) AddUser(user *model.User, provider model.AuthUserProvider)
 		}
 	}
 	_ = rows.Close()
+	user.ID = userID
 
 	// Insert provider data
 	provider.UserID = userID

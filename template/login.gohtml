@@ -22,7 +22,7 @@
             </div>
             <div class="columns is-centered">
                 <div class="column is-half">
-                    <form action="/login" method="POST" id="loginForm">
+                    <form action="/login" method="POST" id="loginForm" data-next-url="{{.next_url}}" data-request-id="{{.request_id}}">
                         <div class="field">
                             <label class="label" for="email">E-Mail</label>
                             <div class="control has-icons-left">
@@ -106,7 +106,6 @@
          * @param {string} token
          */
         window.turnstileCallback = function (token) {
-            console.log("verified", token);
             cfToken = token;
             setLoginBtnDisable(false);
         };
@@ -130,26 +129,12 @@
         }
 
         /**
-         * @param {boolean} open
-         */
-        function toggleTelegramRegModal(open) {
-            const activeClassName = "is-active";
-            const m = document.getElementById("telegramRegModal");
-            if (open) {
-                m.classList.add(activeClassName);
-            } else {
-                m.classList.remove(activeClassName);
-            }
-        }
-
-        /**
          * @param {TelegramUser} user
          */
         function onTelegramAuth(user) {
-            console.info('telegram login', user);
             tgUser = user;
             if (!cfToken) {
-                console.warn('turnstile is not validated yet');
+                showErrorMessage("Please complete the Turnstile challenge first.");
                 document.getElementById("telegramModal").classList.remove("is-active");
                 return;
             }
@@ -161,24 +146,27 @@
             };
             setLoginBtnDisable(true);
             toggleTelegramModal(false);
-            loginReq(formData).then(r => r.json()).then(j => {
-                console.log("login resp", j);
-                if (j.code !== 0) {
-                    console.error("login failed", j);
+            loginReq(formData).then(payload => {
+                if (!payload) {
                     return;
                 }
-                handleRedirect(j.data.user);
+                if (payload.code !== 0) {
+                    showErrorMessage("Login failed. Please try again.");
+                    return;
+                }
+                handleRedirect(payload.data.user, payload.data.next_url);
             }).finally(() => setLoginBtnDisable(false));
         }
 
-        /**
-         * @param {User} user
-         */
-        function handleRedirect(user) {
+        function nextUrl() {
+            return document.getElementById('loginForm').dataset.nextUrl || "/auth";
+        }
+
+        function handleRedirect(user, next) {
             if (!user) {
                 window.location.replace("/registration");
             } else {
-                window.location.replace("/auth");
+                window.location.replace(next || nextUrl());
             }
         }
 
@@ -200,39 +188,36 @@
             };
             setLoginBtnDisable(true);
             loginReq(formData)
-                .then(r => r.json())
-                .then(j => {
-                    console.log(j);
-                    if (j.code !== 0) {
-                        showErrorMessage("Internal Server Error");
-                    } else if (!j.data.user) {
+                .then(payload => {
+                    if (!payload) {
+                        return;
+                    }
+                    if (payload.code !== 0) {
+                        showErrorMessage("Login failed. Check your credentials and try again.");
+                    } else if (!payload.data.user) {
                         showErrorMessage("Invalid Credentials");
                     } else {
-                        handleRedirect(j.data.user);
+                        handleRedirect(payload.data.user, payload.data.next_url);
                     }
                 })
                 .finally(() => setLoginBtnDisable(false));
         });
 
         function loginReq(body) {
+            const requestId = document.getElementById('loginForm').dataset.requestId;
+            body.request_id = requestId || undefined;
             return fetch("/login", {
                 method: "POST",
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
-            }).catch(e => {
-                console.log("login err", e);
+            }).then(async response => {
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            }).catch(() => {
                 showErrorMessage("Network Error");
-            });
-        }
-
-        function regReq(body) {
-            return fetch("/reg", {
-                method: "POST",
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            }).catch(e => {
-                console.log("reg err", e);
-                showErrorMessage("Network Error");
+                return null;
             });
         }
 
