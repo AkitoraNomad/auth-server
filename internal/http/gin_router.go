@@ -42,6 +42,14 @@ func CreateGinEngine(srv *server.Server) *gin.Engine {
 	// Root & static placeholder
 	r.GET("/", gin.WrapF(indexHandler))
 
+	// Vendored CSS used by the server-rendered auth pages. Keeping this route
+	// explicit avoids exposing the assets directory and does not depend on a
+	// public CDN.
+	r.GET("/assets/bulma.min.css", func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.File("assets/bulma.min.css")
+	})
+
 	// Auth related
 	loginHandler := getLoginHandler()
 	r.GET(internal.PathLogin, loginHandler)

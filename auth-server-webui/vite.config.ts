@@ -13,6 +13,7 @@ export default defineConfig({
     strictPort: true,
     allowedHosts: ['aki.internal', 'localhost', '127.0.0.1'],
     proxy: {
+      '/assets': backend,
       '/oauth2': backend,
       '/login': backend,
       '/auth': backend,

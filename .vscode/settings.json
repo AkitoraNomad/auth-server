@@ -11,7 +11,7 @@
     // https://github.com/be5invis/Sarasa-Gothic/releases/download/v1.0.18/SarasaMono-TTF-1.0.18.7z
     "editor.fontFamily": "'等距更纱黑体 SC', 'Fira Code', Consolas",
     // "editor.fontFamily": "'霞鹜文楷等宽', Consolas",
-    "editor.fontSize": 16,
+    "editor.fontSize": 14,
     "editor.formatOnSave": true,
     "editor.insertSpaces": true,
     "editor.tabSize": 4,
