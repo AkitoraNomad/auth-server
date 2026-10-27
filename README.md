@@ -51,6 +51,8 @@ admin:
   redirect-uris:
     - "http://localhost:5173/admin-page/callback"
     - "http://127.0.0.1:5173/admin-page/callback"
+    - "http://localhost:8080/admin-page/callback"
+    - "http://127.0.0.1:8080/admin-page/callback"
   scopes:
     - "manage:system"
     - "manage:clients"
@@ -98,7 +100,7 @@ OAUTH_ISSUER=http://localhost:8080
 | 权限 | 管理 API 校验 JWT 签名/claims、Redis 撤销、管理客户端、真实用户和 `auth_admin`；`manage:system`/`manage:clients` 按路由校验；旧 `/admin/*` 已删除 |
 | 管理页面 | 用户/客户端/管理员已有查询、新建、删除；编辑、启停、密码重置仍为 Phase 3；会话页明确标注 Phase 4，不再返回假成功 |
 | API | 客户端 DTO 已改为 snake_case；客户端 secret 列表不返回，创建时单次展示；统一处理 401/403 与 API 错误 |
-| 交付 | 可生成独立 `dist/`；Go embed、Docker 打包、生产静态托管与 CORS 仍在 Phase 6；前端 README 已补配置、代理和部署说明 |
+| 交付 | 可生成独立 `dist/`；`-tags embedspa` 将 SPA 嵌入 Go 单二进制；Docker 多阶段构建已包含前端；独立静态托管/CORS 仍为可选部署方式 |
 
 验证：`go build ./...`、`go vet ./...`、`go test ./...` 通过；`pnpm build`、`pnpm lint` 通过。已在测试 PostgreSQL/Redis 上使用 Turnstile 测试密钥完成 160 项 HTTP/代理回归，0 项失败；覆盖 OAuth/PKCE 成功流、token/refresh 轮换、JWT 管理 API、普通用户/公共客户端、非管理员/缺 Scope/客户端凭据拒绝、授权码重放、错误 PKCE、错误 state/redirect、旧路由 404、管理员移除即时失效、Redis 撤销、会话/consent 数组清理、服务重启幂等和 Vite 路由/代理。3 项已知问题：stale 登录页可切换 session 用户、跨客户端 refresh 未被拒绝、最后一名管理员可被移除；UserInfo Bearer/ID Token 属 Phase 5。真实浏览器自动化/视觉验收仍待补。
 
@@ -111,7 +113,7 @@ OAUTH_ISSUER=http://localhost:8080
 - **Token 生命周期**：access/refresh token 仅存内存，不写 `localStorage`；页面刷新后经授权服务器会话重新授权。请求前完成认证初始化，统一 Bearer 注入、续期、401 重认证和 403 提示；权限最终由服务端校验。
 - **公开配置**：提供 [.env.example](auth-server-webui/.env.example)，使用 `VITE_ADMIN_CLIENT_ID`、`VITE_AUTH_BASE_URL`、`VITE_API_BASE_URL`；后两者默认当前 origin，回调默认为 SPA origin + `/admin-page/callback`。`VITE_*` 不得包含 secret。开发用 localhost、生产用 HTTPS；代理不覆盖 SPA 路径，跨域时明确允许来源、方法及 Authorization 头。
 - **交互与数据**：简单导航、表格、表单和确认弹窗，支持窄屏、标签及键盘操作。提供加载/空数据/成功/失败状态，防重复提交，危险操作需确认；未实现功能标注不可用。使用 snake_case DTO，secret 仅创建/重置时单次展示，会话不暴露原始 Token。
-- **独立交付**：保留 `pnpm dev/build/lint` 和独立 `dist/`，Go embed 作为 Phase 6 的可选打包方式；前端 README 已补配置、代理、客户端注册和部署说明。
+- **独立交付**：保留 `pnpm dev/build/lint` 和独立 `dist/`；生产可用 `go build -tags embedspa` 把 `dist/` 嵌入单二进制，不需要单独启动静态服务器。
 
 目标路由与对应 API 使用相同权限映射；受保护页面还必须校验管理员身份和管理客户端：
 
@@ -146,7 +148,7 @@ psql "$DB" -f db/migrations/001_phase1_admin_spa.sql
 
 ```bash
 export ADMIN_CLIENT_ID=2
-export ADMIN_CLIENT_REDIRECT_URIS=http://localhost:5173/admin-page/callback,http://127.0.0.1:5173/admin-page/callback
+export ADMIN_CLIENT_REDIRECT_URIS=http://localhost:5173/admin-page/callback,http://127.0.0.1:5173/admin-page/callback,http://localhost:8080/admin-page/callback,http://127.0.0.1:8080/admin-page/callback
 export OAUTH_ISSUER=http://localhost:8080
 go run .
 ```
@@ -180,7 +182,25 @@ pnpm dev
 
 Token 仅存内存；刷新页面会重新经过授权服务器。由于 Phase 1 不持久化 consent，刷新后需要重新确认 Scope（这是当前约定）。
 
-### 5. 建议验收项
+### 5. 单二进制生产构建（嵌入 SPA）
+
+生产环境不需要单独启动静态服务器。先构建前端，再用 `embedspa` 标签构建 Go：
+
+```bash
+pnpm --dir auth-server-webui build
+go build -tags embedspa -o auth-server .
+./auth-server
+```
+
+打开 `http://localhost:8080/admin-page/`。此时 `/admin-page/*` 的 SPA shell、深链和带哈希的静态资源都由 Go 二进制提供。
+
+- 默认 `go build ./...` 仍可正常编译，不嵌入 SPA；Vite dev 继续使用独立的 `5173` 服务。
+- `-tags embedspa` 会嵌入 `auth-server-webui/dist`；如果未先构建前端，Go 构建会直接失败，避免发布空壳 SPA。
+- Dockerfile 已改为 Node 构建 + Go 嵌入的多阶段构建。
+- 生产域名和回调需通过 `ADMIN_CLIENT_REDIRECT_URIS` / `VITE_ADMIN_REDIRECT_URI` 配置；默认已包含本机 `8080` 回调。
+- 资源缓存：`/admin-page/assets/*` 使用一年 immutable，`index.html` 与 SPA 深链使用 `no-store`，缺失的 `.js/.css` 返回 404，不会错误回退成 HTML。
+
+### 6. 建议验收项
 
 - 未登录进入 `/admin-page/users`，完成 PKCE 登录后回到原路径。
 - 只勾选一个管理 Scope，确认另一个页面的导航隐藏、直接访问返回 403。
@@ -242,7 +262,8 @@ Token 仅存内存；刷新页面会重新经过授权服务器。由于 Phase 1
 
 ### Phase 6：部署与交付
 
-- [ ] 支持独立静态托管和 Go embed 单二进制部署；Docker 增加前端构建，验证入口、回调和资源路径。
+- [x] 支持 Go embed 单二进制部署；Dockerfile 增加前端构建；嵌入二进制的 SPA 路由、深链、资源和回调路径已验证（Docker 镜像构建待有 Docker 的环境验证）。
+- [ ] 支持独立静态托管与 CORS 配置，供非 Go 托管场景使用。
 - [ ] 提供增量数据库迁移管理，修复 PostgreSQL 外键删表顺序（基础 schema 已修正），明确遗留 MySQL 支持范围。
 - [ ] 补齐脱敏配置、首次初始化、PostgreSQL/Redis/Turnstile 依赖、HTTPS/代理、密钥管理、备份恢复和升级说明。
 - [ ] CI 接入 Go 测试、前端 build/lint，修复现有 lint 错误；增加隔离数据库/Redis 集成测试和浏览器登录测试。

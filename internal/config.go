@@ -152,6 +152,8 @@ func setAdminDefaults() {
 		AuthServerConfig.Admin.RedirectURIs = []string{
 			"http://localhost:5173/admin-page/callback",
 			"http://127.0.0.1:5173/admin-page/callback",
+			"http://localhost:8080/admin-page/callback",
+			"http://127.0.0.1:8080/admin-page/callback",
 		}
 	}
 	if len(AuthServerConfig.Admin.Scopes) == 0 {

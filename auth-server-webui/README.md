@@ -36,7 +36,15 @@ pnpm build
 pnpm lint
 ```
 
-`dist/` 是独立静态产物。Go embed、Docker 打包和生产静态托管仍在项目 README 的 Phase 6。
+`dist/` 是独立静态产物。生产可将其嵌入 Go 二进制，不需要单独启动静态服务器：
+
+```bash
+pnpm build
+cd ..
+go build -tags embedspa -o auth-server .
+```
+
+默认 `go build` 不嵌入 SPA；开发仍使用 Vite 的 `5173` 服务。Docker 已使用多阶段构建自动完成前端 build 和 Go embed。
 
 ## 认证行为
 

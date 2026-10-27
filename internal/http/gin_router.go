@@ -4,10 +4,12 @@ import (
 	"auth-server/internal"
 	"auth-server/internal/http/admin"
 	"auth-server/internal/model"
+	"auth-server/internal/webui"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -21,7 +23,7 @@ import (
 
 // CreateGinEngine builds a gin.Engine replacing the previous net/http mux.
 // Gradually wraps existing handler funcs to reduce refactor impact.
-func CreateGinEngine(srv *server.Server) *gin.Engine {
+func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	r := gin.New()
 	// discard default gin text logger, we use slog
 	gin.DefaultWriter = io.Discard
@@ -88,6 +90,10 @@ func CreateGinEngine(srv *server.Server) *gin.Engine {
 		apiAdmin.GET("/sessions", admin.RequireScope(model.ScopeManageSystem), admin.GetSessionsAPI(srv.Manager))
 		apiAdmin.DELETE("/sessions/:user_id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteSessionAPI(srv.Manager))
 	}
+
+	// Embedded management SPA. Register is a no-op unless the binary was built
+	// with -tags embedspa; OAuth2 and /api routes are not affected.
+	webui.Register(r, spaAssets)
 
 	// 404 fallback
 	r.NoRoute(func(c *gin.Context) {

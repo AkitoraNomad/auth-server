@@ -17,7 +17,7 @@ func main() {
 	}
 
 	srv := oauth2.InitServer()
-	engine := oauth2Http.CreateGinEngine(srv)
+	engine := oauth2Http.CreateGinEngine(srv, spaAssetsFS())
 	addr := fmt.Sprintf("%s:%d", internal.AuthServerConfig.Host, internal.AuthServerConfig.Port)
 	slog.Info("Server started.", "addr", addr)
 	// gin.Engine.Run uses http.ListenAndServe; process signal handling is left to
