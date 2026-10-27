@@ -137,6 +137,10 @@ class ApiClient {
   getSessions(): Promise<User[]> {
     return this.request<User[]>('/api/admin/sessions')
   }
+
+  revokeUserSessions(userId: number): Promise<void> {
+    return this.request<void>(`/api/admin/sessions/${userId}`, { method: 'DELETE' })
+  }
 }
 
 function extractErrorMessage(payload: unknown): string | null {

@@ -18,13 +18,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-oauth2/oauth2/v4/server"
-	"github.com/go-session/session/v3"
 )
 
 // CreateGinEngine builds a gin.Engine replacing the previous net/http mux.
 // Gradually wraps existing handler funcs to reduce refactor impact.
 func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	r := gin.New()
+	// Forwarded IP headers are untrusted unless an explicit proxy policy is
+	// configured. Authentication limits use the transport peer address.
+	if err := r.SetTrustedProxies(internal.AuthServerConfig.TrustedProxies); err != nil {
+		panic("invalid trusted-proxies configuration")
+	}
 	// discard default gin text logger, we use slog
 	gin.DefaultWriter = io.Discard
 	// ensure panic stack traces are printed to the console
@@ -33,13 +37,14 @@ func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 		slog.Error("panic recovered", "err", fmt.Sprintf("%v", recovered), "path", c.Request.URL.Path)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 			"code": 1,
-			"msg":  fmt.Sprintf("%v", recovered),
+			"msg":  "internal server error",
 		})
 	}))
 	r.Use(ginSlogLogger())
-
-	// keep previous session expiration behavior (15 minutes)
-	session.SetExpired(15 * 60)
+	r.Use(securityHeadersMiddleware())
+	r.Use(sameOriginMiddleware())
+	r.Use(bodyLimitMiddleware())
+	r.Use(authRateMiddleware())
 
 	// Root & static placeholder
 	r.GET("/", gin.WrapF(indexHandler))
@@ -62,6 +67,9 @@ func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	r.POST(internal.PathToken, gin.WrapF(getTokenHandler(srv)))
 	r.POST(internal.PathIntrospect, gin.WrapF(getIntrospectHandler(srv)))
 	r.POST(internal.PathUserinfo, gin.WrapF(getUserinfoHandler(srv)))
+	r.GET(internal.PathUserinfo, gin.WrapF(getUserinfoHandler(srv)))
+	r.GET("/logout", gin.WrapF(getLogoutHandler(srv)))
+	r.POST("/logout", gin.WrapF(getLogoutHandler(srv)))
 	r.GET(internal.PathDiscovery, gin.WrapF(discoveryHandler))
 	r.GET(internal.PathJwkSet, gin.WrapF(jwkSetHandler))
 	r.GET(internal.PathRegistration, gin.WrapF(getRegistrationHandler(srv)))
@@ -72,6 +80,7 @@ func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	// its own management scope.
 	apiAdmin := r.Group("/api/admin")
 	apiAdmin.Use(admin.RequireAdmin(srv.Manager))
+	apiAdmin.Use(admin.RequireRecentAuthentication(srv.Manager))
 	{
 		apiAdmin.GET("/me", admin.GetMeAPI())
 

@@ -102,7 +102,7 @@ func handleInitialAuthorize(w http.ResponseWriter, r *http.Request, s session.St
 		return
 	}
 
-	if _, ok := s.Get(internal.SessionKeyUserID); !ok {
+	if currentSessionUser(r.Context(), s) == nil {
 		redirectToLogin(w, r, state.ID)
 		return
 	}
@@ -110,6 +110,10 @@ func handleInitialAuthorize(w http.ResponseWriter, r *http.Request, s session.St
 }
 
 func handleConsentSubmission(w http.ResponseWriter, r *http.Request, s session.Store, srv *server.Server, requestID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "consent requires POST", http.StatusMethodNotAllowed)
+		return
+	}
 	state := findAuthorizeRequest(s, requestID)
 	if state == nil {
 		writeAuthorizeError(w, "invalid_request", "authorization request not found or expired")
@@ -120,7 +124,7 @@ func handleConsentSubmission(w http.ResponseWriter, r *http.Request, s session.S
 		writeAuthorizeError(w, "invalid_request", err.Error())
 		return
 	}
-	if _, ok := s.Get(internal.SessionKeyUserID); !ok {
+	if currentSessionUser(r.Context(), s) == nil {
 		redirectToLogin(w, r, state.ID)
 		return
 	}

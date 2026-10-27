@@ -1,0 +1,654 @@
+package oauth2
+
+import (
+	"auth-server/internal"
+	"auth-server/internal/model"
+	"auth-server/internal/store"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	oauth "github.com/go-oauth2/oauth2/v4"
+	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/go-oauth2/oauth2/v4/models"
+	"github.com/go-oauth2/oauth2/v4/server"
+	"github.com/go-session/session/v3"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type clientMap map[string]oauth.ClientInfo
+
+func (c clientMap) GetByID(_ context.Context, id string) (oauth.ClientInfo, error) { return c[id], nil }
+
+type fixtureGenerator struct{ barrier func() }
+
+func (g fixtureGenerator) Token(_ context.Context, _ *oauth.GenerateBasic, refresh bool) (string, string, error) {
+	if g.barrier != nil {
+		g.barrier()
+	}
+	r := ""
+	if refresh {
+		r = uuid.NewString()
+	}
+	return uuid.NewString(), r, nil
+}
+
+type activeUserRepo struct{ store.UserStore }
+
+func (activeUserRepo) GetUserByID(id int64) (*model.User, error) {
+	return &model.User{ID: id, Email: "fixture@example.invalid"}, nil
+}
+func fixtureServer(t *testing.T) (*server.Server, *clientBoundManager, *model.AuthClient) {
+	t.Helper()
+	oldUser, oldClient, oldRedis := store.UserRepo, store.ClientRepo, internal.Rdb
+	t.Cleanup(func() { store.UserRepo = oldUser; store.ClientRepo = oldClient; internal.Rdb = oldRedis })
+	store.UserRepo = activeUserRepo{}
+	client := &model.AuthClient{ID: 1, Secret: "correct-secret", Scopes: model.TextArray{"profile"}, RedirectURIs: model.TextArray{"https://app.example.invalid/callback"}, GrantTypes: model.TextArray{"authorization_code", "refresh_token"}}
+	clients := clientMap{"1": client, "2": &model.AuthClient{ID: 2, Secret: "other-secret", GrantTypes: model.TextArray{"refresh_token"}}}
+	store.ClientRepo = clients
+	manager := manage.NewDefaultManager()
+	manager.MapClientStorage(clients)
+	manager.MapTokenStorage(store.AuditTokenStore())
+	manager.MapAccessGenerate(fixtureGenerator{})
+	bound := newClientBoundManager(manager, internal.Rdb)
+	srv := server.NewServer(&server.Config{TokenType: "Bearer", AllowedResponseTypes: []oauth.ResponseType{oauth.Code}, AllowedGrantTypes: []oauth.GrantType{oauth.AuthorizationCode, oauth.ClientCredentials, oauth.Refreshing}, AllowedCodeChallengeMethods: []oauth.CodeChallengeMethod{oauth.CodeChallengeS256}, ForcePKCE: true}, bound)
+	srv.SetClientInfoHandler(clientInfoHandler)
+	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
+	srv.SetClientScopeHandler(clientScopeHandler)
+	return srv, bound, client
+}
+func seedToken(t *testing.T, mgr *clientBoundManager, scope string) oauth.TokenInfo {
+	t.Helper()
+	manager := mgr
+	// Obtain a valid user-bound token through the real authorization-code flow.
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	code, err := manager.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", RedirectURI: "https://app.example.invalid/callback", Scope: scope, CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := manager.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Code: code.GetCode(), RedirectURI: "https://app.example.invalid/callback", CodeVerifier: verifier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+func refresh(srv *server.Server, id, secret, token, scope string) *httptest.ResponseRecorder {
+	values := url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {token}}
+	if secret != "" {
+		values.Set("client_secret", secret)
+	}
+	if scope != "" {
+		values.Set("scope", scope)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	_ = srv.HandleTokenRequest(response, req)
+	return response
+}
+
+func TestConfidentialRefreshRequiresClientSecret(t *testing.T) {
+	for _, secret := range []string{"", "wrong-secret"} {
+		t.Run(fmt.Sprintf("secret=%q", secret), func(t *testing.T) {
+			srv, mgr, _ := fixtureServer(t)
+			token := seedToken(t, mgr, "profile")
+			response := refresh(srv, "1", secret, token.GetRefresh(), "")
+			if response.Code == 200 {
+				t.Fatalf("confidential refresh accepted missing/incorrect secret, HTTP %d", response.Code)
+			}
+		})
+	}
+}
+func TestCrossClientRefreshIsRejected(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	if response := refresh(srv, "2", "other-secret", token.GetRefresh(), ""); response.Code == 200 {
+		t.Fatal("cross-client refresh accepted")
+	}
+}
+func TestRefreshMustHonorCurrentScopeAllowlist(t *testing.T) {
+	srv, mgr, client := fixtureServer(t)
+	client.Scopes = model.TextArray{"profile", "avatar"}
+	token := seedToken(t, mgr, "profile avatar")
+	client.Scopes = model.TextArray{"profile"}
+	if response := refresh(srv, "1", "correct-secret", token.GetRefresh(), ""); response.Code == 200 && strings.Contains(response.Body.String(), "avatar") {
+		t.Fatal("omitting scope retained removed avatar permission")
+	}
+}
+func TestExplicitScopeCannotEscalate(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	if response := refresh(srv, "1", "correct-secret", token.GetRefresh(), "manage:system"); response.Code == 200 {
+		t.Fatal("scope escalation accepted")
+	}
+}
+func TestRefreshMustBeSingleUseConcurrently(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	var mu sync.Mutex
+	arrived := 0
+	ready := make(chan struct{})
+	mgr.Manager.(*manage.Manager).MapAccessGenerate(fixtureGenerator{barrier: func() {
+		mu.Lock()
+		arrived++
+		if arrived == 2 {
+			close(ready)
+		}
+		mu.Unlock()
+		select {
+		case <-ready:
+		case <-time.After(3 * time.Second):
+		}
+	}})
+	responses := make(chan int, 2)
+	for range 2 {
+		go func() { responses <- refresh(srv, "1", "correct-secret", token.GetRefresh(), "").Code }()
+	}
+	successes := 0
+	for range 2 {
+		if <-responses == 200 {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("same refresh token issued %d successful successor pairs (expected exactly 1)", successes)
+	}
+}
+func TestRefreshReplayMustRevokeSuccessor(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	request := &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Refresh: token.GetRefresh()}
+	successor, err := mgr.RefreshAccessToken(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = mgr.RefreshAccessToken(context.Background(), request); err == nil {
+		t.Fatal("old refresh accepted twice")
+	}
+	if _, err = mgr.LoadRefreshToken(context.Background(), successor.GetRefresh()); err == nil {
+		t.Fatal("replay was rejected but stolen-token successor remains active; no family revocation")
+	}
+}
+
+type deletedUserRepo struct{ store.UserStore }
+
+func (deletedUserRepo) GetUserByID(int64) (*model.User, error) {
+	return nil, fmt.Errorf("user deleted")
+}
+func TestDeletedUserMustNotRefresh(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	old := store.UserRepo
+	store.UserRepo = deletedUserRepo{}
+	defer func() { store.UserRepo = old }()
+	if response := refresh(srv, "1", "correct-secret", token.GetRefresh(), ""); response.Code == 200 {
+		t.Fatal("deleted user's refresh token still creates access/refresh tokens")
+	}
+}
+func TestStaleSessionMustRecheckUser(t *testing.T) {
+	old := store.UserRepo
+	store.UserRepo = deletedUserRepo{}
+	defer func() { store.UserRepo = old }()
+	session.InitManager(session.SetStore(session.NewMemoryStore()))
+	req := httptest.NewRequest("GET", "https://auth.example.invalid/oauth2/authorize", nil)
+	response := httptest.NewRecorder()
+	sess, err := session.Start(req.Context(), response, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Set(internal.SessionKeyUserID, map[string]any{"user": map[string]any{"id": int64(42), "email": "deleted@example.invalid"}})
+	if err = sess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	next := httptest.NewRequest("GET", "https://auth.example.invalid/oauth2/authorize", nil)
+	next.AddCookie(response.Result().Cookies()[0])
+	user, err := userAuthorizeHandler(httptest.NewRecorder(), next)
+	if err == nil && user == "42" {
+		t.Fatal("authorization trusts deleted user retained in session")
+	}
+}
+func TestJWTSignatureIssuerAudienceControls(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	JWTKeys = []model.JWTKey{&model.RSAKey{KeyID: "fixture", PublicKey: &key.PublicKey, PrivateKey: key}}
+	internal.AuthServerConfig.Issuer = "https://auth.example.invalid"
+	claims := AccessTokenClaims{ClientID: "1", Scope: "profile", TokenUse: "access", RegisteredClaims: jwt.RegisteredClaims{Issuer: internal.AuthServerConfig.Issuer, Subject: "42", Audience: jwt.ClaimStrings{"1"}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute))}}
+	raw, err := signedFixtureJWT(jwt.SigningMethodRS256, claims, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ParseAccessToken(raw, "1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, alg := range []jwt.SigningMethod{jwt.SigningMethodNone, jwt.SigningMethodHS256} {
+		var signingKey any = []byte("fixture")
+		if alg == jwt.SigningMethodNone {
+			signingKey = jwt.UnsafeAllowNoneSignatureType
+		}
+		forged, err := signedFixtureJWT(alg, claims, signingKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = ParseAccessToken(forged, "1"); err == nil {
+			t.Errorf("accepted %s", alg.Alg())
+		}
+	}
+	if _, err = ParseAccessToken(raw, "other-client"); err == nil {
+		t.Error("wrong audience accepted")
+	}
+	claims.Issuer = "https://wrong.example.invalid"
+	wrong, _ := signedFixtureJWT(jwt.SigningMethodRS256, claims, key)
+	if _, err = ParseAccessToken(wrong, "1"); err == nil {
+		t.Error("wrong issuer accepted")
+	}
+}
+
+func signedFixtureJWT(method jwt.SigningMethod, claims jwt.Claims, key any) (string, error) {
+	token := jwt.NewWithClaims(method, claims)
+	token.Header["kid"] = "fixture"
+	return token.SignedString(key)
+}
+func TestPKCEAndAuthorizationCodeControls(t *testing.T) {
+	for _, scenario := range []string{"valid", "wrong-verifier", "missing-verifier", "replay"} {
+		t.Run(scenario, func(t *testing.T) {
+			srv, mgr, _ := fixtureServer(t)
+			verifier := strings.Repeat("v", 43)
+			digest := sha256.Sum256([]byte(verifier))
+			code, err := mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", RedirectURI: "https://app.example.invalid/callback", Scope: "profile", CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := url.Values{"grant_type": {"authorization_code"}, "client_id": {"1"}, "client_secret": {"correct-secret"}, "code": {code.GetCode()}, "redirect_uri": {"https://app.example.invalid/callback"}, "code_verifier": {verifier}}
+			if scenario == "wrong-verifier" {
+				values.Set("code_verifier", strings.Repeat("x", 43))
+			}
+			if scenario == "missing-verifier" {
+				values.Del("code_verifier")
+			}
+			exchange := func() int {
+				req := httptest.NewRequest("POST", "/oauth2/token", strings.NewReader(values.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				response := httptest.NewRecorder()
+				_ = srv.HandleTokenRequest(response, req)
+				return response.Code
+			}
+			status := exchange()
+			if scenario == "wrong-verifier" || scenario == "missing-verifier" {
+				if status == 200 {
+					t.Fatal("PKCE verification bypassed")
+				}
+				return
+			}
+			if status != 200 {
+				t.Fatalf("valid PKCE request failed, HTTP %d", status)
+			}
+			if scenario == "replay" && exchange() == 200 {
+				t.Fatal("authorization code accepted twice")
+			}
+		})
+	}
+}
+
+func TestRedirectURIMustMatchExactly(t *testing.T) {
+	client := &model.AuthClient{RedirectURIs: model.TextArray{"https://app.example.invalid/callback"}}
+	if !client.AllowsRedirectURI("https://app.example.invalid/callback") {
+		t.Fatal("registered redirect rejected")
+	}
+	for _, uri := range []string{"https://app.example.invalid.evil.invalid/callback", "https://app.example.invalid/callback/", "https://app.example.invalid/callback?extra=1", "https://app.example.invalid@evil.invalid/callback", "http://app.example.invalid/callback"} {
+		if client.AllowsRedirectURI(uri) {
+			t.Errorf("unregistered redirect accepted: %s", uri)
+		}
+	}
+}
+
+func TestPKCEMustRejectOneCharacterVerifier(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	digest := sha256.Sum256([]byte("x"))
+	code, err := mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", RedirectURI: "https://app.example.invalid/callback", Scope: "profile", CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := url.Values{"grant_type": {"authorization_code"}, "client_id": {"1"}, "client_secret": {"correct-secret"}, "code": {code.GetCode()}, "redirect_uri": {"https://app.example.invalid/callback"}, "code_verifier": {"x"}}
+	req := httptest.NewRequest("POST", "/oauth2/token", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	_ = srv.HandleTokenRequest(response, req)
+	if response.Code == 200 {
+		t.Fatal("one-character PKCE verifier accepted (RFC 7636 requires 43..128 unreserved characters)")
+	}
+}
+
+func TestJWTMustRejectUnknownKeyID(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	JWTKeys = []model.JWTKey{&model.RSAKey{KeyID: "configured-key", PublicKey: &key.PublicKey, PrivateKey: key}}
+	internal.AuthServerConfig.Issuer = "https://auth.example.invalid"
+	claims := AccessTokenClaims{ClientID: "1", TokenUse: "access", RegisteredClaims: jwt.RegisteredClaims{Issuer: internal.AuthServerConfig.Issuer, Subject: "42", Audience: jwt.ClaimStrings{"1"}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute))}}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = "unconfigured-key"
+	raw, err := token.SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ParseAccessToken(raw, "1"); err == nil {
+		t.Fatal("kid ignored; valid signature with unconfigured kid accepted (not a signature forgery)")
+	}
+}
+
+// Ensure these probes use the production token representation, not a reduced mock.
+var _ oauth.TokenInfo = (*models.Token)(nil)
+
+func TestPublicPKCERefreshWorksWithoutEmbeddedSecret(t *testing.T) {
+	srv, mgr, client := fixtureServer(t)
+	client.Public = true
+	client.Secret = ""
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	code, err := mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", RedirectURI: client.RedirectURIs[0], Scope: "profile", CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := mgr.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: "1", Code: code.GetCode(), RedirectURI: client.RedirectURIs[0], CodeVerifier: verifier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := refresh(srv, "1", "", token.GetRefresh(), ""); response.Code != 200 {
+		t.Fatalf("public refresh failed: %s", response.Body.String())
+	}
+}
+
+func TestHTTPRefreshReplayWithScopeRevokesFamily(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	first := refresh(srv, "1", "correct-secret", token.GetRefresh(), "profile")
+	if first.Code != 200 {
+		t.Fatal(first.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	second := refresh(srv, "1", "correct-secret", token.GetRefresh(), "profile")
+	if second.Code == 200 {
+		t.Fatal("HTTP replay accepted")
+	}
+	if _, err := mgr.LoadRefreshToken(context.Background(), body["refresh_token"].(string)); err == nil {
+		t.Fatal("scoped HTTP replay left successor refresh active")
+	}
+	if _, err := mgr.LoadAccessToken(context.Background(), body["access_token"].(string)); err == nil {
+		t.Fatal("scoped HTTP replay left successor access active")
+	}
+}
+
+func TestCrossClientAttemptCannotRevokeVictimFamily(t *testing.T) {
+	srv, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	if response := refresh(srv, "2", "other-secret", token.GetRefresh(), ""); response.Code == 200 {
+		t.Fatal("wrong client accepted")
+	}
+	if response := refresh(srv, "1", "correct-secret", token.GetRefresh(), ""); response.Code != 200 {
+		t.Fatalf("victim family was revoked: %s", response.Body.String())
+	}
+}
+
+func TestRevocationBlocksTokensCodesAndStaleSessionsButAllowsNewLogin(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	code, err := mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", Scope: "profile", RedirectURI: "https://app.example.invalid/callback", CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := UserSessionVersion(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &model.SessionUserInfo{User: &model.User{ID: 42}, AuthVersion: version, LoginAt: time.Now()}
+	if !SessionIsActive(context.Background(), info) {
+		t.Fatal("valid session rejected")
+	}
+	if err := RevokeUserSessions(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if SessionIsActive(context.Background(), info) {
+		t.Fatal("revoked session active")
+	}
+	if _, err := mgr.LoadAccessToken(context.Background(), token.GetAccess()); err == nil {
+		t.Fatal("revoked access active")
+	}
+	if _, err := mgr.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Refresh: token.GetRefresh()}); err == nil {
+		t.Fatal("revoked refresh accepted")
+	}
+	if _, err := mgr.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Code: code.GetCode(), RedirectURI: "https://app.example.invalid/callback", CodeVerifier: verifier}); err == nil {
+		t.Fatal("revoked code exchanged")
+	}
+	newer := seedToken(t, mgr, "profile")
+	if _, err := mgr.LoadAccessToken(context.Background(), newer.GetAccess()); err != nil {
+		t.Fatalf("new login blocked after revocation: %v", err)
+	}
+}
+
+func TestCodeExchangeChecksCurrentUserAndScopePolicy(t *testing.T) {
+	for _, change := range []string{"scope", "user", "redirect", "empty-secret"} {
+		t.Run(change, func(t *testing.T) {
+			_, mgr, client := fixtureServer(t)
+			verifier := strings.Repeat("v", 43)
+			digest := sha256.Sum256([]byte(verifier))
+			code, err := mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "1", UserID: "42", Scope: "profile", RedirectURI: client.RedirectURIs[0], CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "scope":
+				client.Scopes = nil
+			case "user":
+				store.UserRepo = deletedUserRepo{}
+			case "redirect":
+				client.RedirectURIs = model.TextArray{"https://different.example.invalid/callback"}
+			case "empty-secret":
+				client.Secret = ""
+			}
+			if _, err := mgr.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Code: code.GetCode(), RedirectURI: "https://app.example.invalid/callback", CodeVerifier: verifier}); err == nil {
+				t.Fatal("stale policy accepted")
+			}
+		})
+	}
+}
+
+func TestRefreshCanDropRemovedScope(t *testing.T) {
+	srv, mgr, client := fixtureServer(t)
+	client.Scopes = model.TextArray{"profile", "avatar"}
+	token := seedToken(t, mgr, "profile avatar")
+	client.Scopes = model.TextArray{"profile"}
+	response := refresh(srv, "1", "correct-secret", token.GetRefresh(), "profile")
+	if response.Code != 200 || strings.Contains(response.Body.String(), "avatar") {
+		t.Fatalf("safe downscope rejected or elevated: %s", response.Body.String())
+	}
+}
+
+func TestRevocationDuringRefreshCannotPublishSuccessor(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	var issued string
+	mgr.Manager.(*manage.Manager).MapAccessGenerate(fixtureCaptureGenerator{capture: func(access string) {
+		issued = access
+		if err := RevokeUserSessions(context.Background(), 42); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	if _, err := mgr.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Refresh: token.GetRefresh()}); err == nil {
+		t.Fatal("in-flight refresh succeeded after revocation")
+	}
+	if issued == "" {
+		t.Fatal("did not reach controlled publication race")
+	}
+	if _, err := mgr.LoadAccessToken(context.Background(), issued); err == nil {
+		t.Fatal("orphaned successor active")
+	}
+}
+
+type fixtureCaptureGenerator struct{ capture func(string) }
+
+func (g fixtureCaptureGenerator) Token(_ context.Context, _ *oauth.GenerateBasic, refresh bool) (string, string, error) {
+	access := uuid.NewString()
+	g.capture(access)
+	return access, uuid.NewString(), nil
+}
+
+func TestPublicationFailureLeavesNoUsableUntrackedToken(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	client, state := store.AuditRedisClient()
+	internal.Rdb = client
+	mgr.rdb = client
+	mgr.Manager.(*manage.Manager).MapTokenStorage(store.NewRedisStoreWithCli(client))
+	token := seedToken(t, mgr, "profile")
+	var issued string
+	mgr.Manager.(*manage.Manager).MapAccessGenerate(fixtureCaptureGenerator{capture: func(access string) { issued = access }})
+	state.Before = func(cmd redis.Cmder) {
+		if cmd.Name() == "eval" && strings.Contains(fmt.Sprint(cmd.Args()[1]), "auth-publish-family-v1") {
+			cmd.SetErr(fmt.Errorf("injected publication fault"))
+		}
+	}
+	if _, err := mgr.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Refresh: token.GetRefresh()}); err == nil {
+		t.Fatal("refresh succeeded with failed publication")
+	}
+	if issued == "" {
+		t.Fatal("did not reach publication fault")
+	}
+	if _, err := mgr.LoadAccessToken(context.Background(), issued); err == nil {
+		t.Fatal("untracked successor usable after publication failure")
+	}
+}
+
+func TestAbsoluteSessionLifetimeAndLegacySessions(t *testing.T) {
+	_, _, _ = fixtureServer(t)
+	for _, info := range []*model.SessionUserInfo{
+		nil, {}, {User: &model.User{ID: 42}, LoginAt: time.Now()},
+		{User: &model.User{ID: 42}, AuthVersion: "0", LoginAt: time.Now().Add(-13 * time.Hour)},
+		{User: &model.User{ID: 42}, AuthVersion: "0", LoginAt: time.Now().Add(2 * time.Minute)},
+	} {
+		if SessionIsActive(context.Background(), info) {
+			t.Fatal("legacy/expired/malformed session accepted")
+		}
+	}
+}
+
+func TestProductionSessionOptionsAndRotation(t *testing.T) {
+	client, _ := store.AuditRedisClient()
+	oldRdb := internal.Rdb
+	internal.Rdb = client
+	defer func() { internal.Rdb = oldRdb }()
+	internal.AuthServerConfig.Issuer = "https://auth.example.invalid"
+	internal.AuthServerConfig.JWT = []internal.JWTConfig{{Sec: "fixture-only-signing-material"}}
+	mgr := session.NewManager(sessionOptions()...)
+	request := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	response := httptest.NewRecorder()
+	sess, err := mgr.Start(context.Background(), response, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.Set("pending", "preserved")
+	if err := sess.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cookie := response.Result().Cookies()[0]
+	if !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.MaxAge != 900 {
+		t.Fatalf("unsafe cookie: %s", cookie.String())
+	}
+	next := httptest.NewRequest("POST", "http://internal-proxy/login", nil)
+	next.AddCookie(cookie)
+	rotated, err := mgr.Refresh(context.Background(), httptest.NewRecorder(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.SessionID() == sess.SessionID() {
+		t.Fatal("session id not rotated")
+	}
+	if value, _ := rotated.Get("pending"); value != "preserved" {
+		t.Fatal("pending authorization lost")
+	}
+	oldRequest := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	oldRequest.AddCookie(cookie)
+	oldSession, err := mgr.Start(context.Background(), httptest.NewRecorder(), oldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := oldSession.Get("pending"); ok {
+		t.Fatal("old SID retained authentication state")
+	}
+	query := httptest.NewRequest("GET", "http://internal-proxy/login?go_session_id="+url.QueryEscape(cookie.Value), nil)
+	querySession, err := mgr.Start(context.Background(), httptest.NewRecorder(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if querySession.SessionID() == sess.SessionID() {
+		t.Fatal("query SID was accepted")
+	}
+}
+
+func TestRecentAuthenticationDoesNotSlideWithRefresh(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	if !mgr.RecentlyAuthenticated(context.Background(), token.GetAccess()) {
+		t.Fatal("fresh authentication rejected")
+	}
+	family, err := mgr.rdb.Get(context.Background(), accessFamilyPrefix+token.GetAccess()).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := mgr.familyPolicy(context.Background(), family)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.AuthTime = time.Now().Add(-16 * time.Minute).Unix()
+	encoded, _ := json.Marshal(policy)
+	if err := mgr.rdb.Set(context.Background(), familyPrefix+family, encoded, tokenFamilyTTL).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if mgr.RecentlyAuthenticated(context.Background(), token.GetAccess()) {
+		t.Fatal("stale authentication permitted sensitive write")
+	}
+	renewed, err := mgr.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "1", ClientSecret: "correct-secret", Refresh: token.GetRefresh()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mgr.RecentlyAuthenticated(context.Background(), renewed.GetAccess()) {
+		t.Fatal("refresh renewed recent-auth window")
+	}
+}
+
+func TestMissingUserGenerationNeverReactivatesOldTokens(t *testing.T) {
+	_, mgr, _ := fixtureServer(t)
+	token := seedToken(t, mgr, "profile")
+	if _, err := mgr.LoadAccessToken(context.Background(), token.GetAccess()); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.rdb.Del(context.Background(), userVersionPrefix+"42").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.LoadAccessToken(context.Background(), token.GetAccess()); err == nil {
+		t.Fatal("missing security generation reactivated a pre-revocation token")
+	}
+	newer := seedToken(t, mgr, "profile")
+	if _, err := mgr.LoadAccessToken(context.Background(), newer.GetAccess()); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -45,8 +45,7 @@ export default function SessionsPage() {
       <PageHeader
         eyebrow="Governance"
         title="Sessions"
-        description="Review the user records currently visible to the session endpoint. A true active-token and session inventory is planned for Phase 4."
-        actions={<span className="badge badge-warning badge-sm">Phase 4</span>}
+        description="Revoke all existing grants and SSO sessions for a user. Users can sign in again afterward."
       />
 
       <div className="alert alert-info alert-soft items-start" role="status">
@@ -64,10 +63,10 @@ export default function SessionsPage() {
           <path d="M12 11v5M12 8h.01" />
         </svg>
         <div>
-          <p className="font-medium">Read-only placeholder</p>
+          <p className="font-medium">User-wide sign out</p>
           <p className="mt-0.5 text-sm opacity-80">
-            Session listing and forced revocation are not implemented yet. Revoke stays disabled
-            rather than returning a false success.
+            Revocation ends all existing server sessions and grants for the selected user.
+            This table lists users, rather than individual active sessions.
           </p>
         </div>
       </div>
@@ -78,7 +77,7 @@ export default function SessionsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-base-300 px-5 py-4">
           <div>
             <h2 className="font-semibold">User records</h2>
-            <p className="text-sm text-base-content/50">Current fallback data returned by the endpoint.</p>
+            <p className="text-sm text-base-content/50">Choose a user whose existing access should be revoked.</p>
           </div>
           <span className="badge badge-ghost badge-sm">{users.length} total</span>
         </div>
@@ -126,8 +125,10 @@ export default function SessionsPage() {
                       <div className="flex justify-end">
                         <button
                           className="btn btn-ghost btn-xs"
-                          disabled
-                          title="Session revocation is planned for Phase 4"
+                          onClick={() => {
+                            if (!window.confirm(`Revoke all sessions for ${user.email}?`)) return
+                            void api.revokeUserSessions(user.id).then(reload).catch((err: unknown) => setError(errorMessage(err)))
+                          }}
                         >
                           Revoke
                         </button>

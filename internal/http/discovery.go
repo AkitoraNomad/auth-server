@@ -23,7 +23,7 @@ func discoveryHandler(w http.ResponseWriter, _ *http.Request) {
 		"jwks_uri":                              issuer + internal.PathJwkSet,
 		"userinfo_endpoint":                     issuer + internal.PathUserinfo,
 		"introspection_endpoint":                issuer + internal.PathIntrospect,
-		"response_types_supported":              []string{"code", "token"},
+		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"subject_types_supported":               []string{"public"},

@@ -1,0 +1,276 @@
+package store
+
+import (
+	"auth-server/internal"
+	"context"
+	"fmt"
+	"github.com/redis/go-redis/v9"
+	"net"
+	"strings"
+	"sync"
+	"time"
+)
+
+// AuditRedisState supplies deterministic, atomic Redis command semantics for
+// the production concrete *redis.Client. No network connection is made.
+// Before/After callbacks are installed before concurrent work starts.
+type AuditRedisState struct {
+	mu      sync.Mutex
+	data    map[string]string
+	sets    map[string]map[string]bool
+	expires map[string]time.Time
+	Before  func(redis.Cmder)
+	After   func(redis.Cmder)
+}
+
+func AuditRedisClient() (*redis.Client, *AuditRedisState) {
+	state := &AuditRedisState{data: map[string]string{}, sets: map[string]map[string]bool{}, expires: map[string]time.Time{}}
+	client := redis.NewClient(&redis.Options{Addr: "audit.invalid:0", Dialer: func(context.Context, string, string) (net.Conn, error) {
+		return nil, fmt.Errorf("audit network forbidden")
+	}})
+	client.AddHook(state)
+	return client, state
+}
+func AuditTokenStore() *TokenStore {
+	client, _ := AuditRedisClient()
+	internal.Rdb = client
+	return NewRedisStoreWithCli(client)
+}
+func (s *AuditRedisState) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (s *AuditRedisState) ProcessHook(_ redis.ProcessHook) redis.ProcessHook {
+	return func(_ context.Context, cmd redis.Cmder) error {
+		if s.Before != nil {
+			s.Before(cmd)
+		}
+		if cmd.Err() != nil {
+			return cmd.Err()
+		}
+		s.mu.Lock()
+		s.process(cmd)
+		s.mu.Unlock()
+		if s.After != nil {
+			s.After(cmd)
+		}
+		return cmd.Err()
+	}
+}
+func (s *AuditRedisState) ProcessPipelineHook(_ redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(_ context.Context, cmds []redis.Cmder) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var first error
+		for _, cmd := range cmds {
+			s.process(cmd)
+			if first == nil {
+				first = cmd.Err()
+			}
+		}
+		return first
+	}
+}
+func textArg(value any) string {
+	if b, ok := value.([]byte); ok {
+		return string(b)
+	}
+	return fmt.Sprint(value)
+}
+func (s *AuditRedisState) purge(key string) {
+	if expiry, ok := s.expires[key]; ok && time.Now().After(expiry) {
+		delete(s.data, key)
+		delete(s.sets, key)
+		delete(s.expires, key)
+	}
+}
+func (s *AuditRedisState) exists(key string) bool {
+	s.purge(key)
+	_, a := s.data[key]
+	_, b := s.sets[key]
+	return a || b
+}
+func (s *AuditRedisState) process(cmd redis.Cmder) {
+	args := cmd.Args()
+	name := cmd.Name()
+	key := ""
+	if len(args) > 1 {
+		key = textArg(args[1])
+	}
+	switch name {
+	case "multi":
+		cmd.(*redis.StatusCmd).SetVal("OK")
+	case "exec":
+		cmd.(*redis.SliceCmd).SetVal([]any{})
+	case "get":
+		s.purge(key)
+		if value, ok := s.data[key]; ok {
+			cmd.(*redis.StringCmd).SetVal(value)
+		} else {
+			cmd.SetErr(redis.Nil)
+		}
+	case "setnx":
+		if s.exists(key) {
+			cmd.(*redis.BoolCmd).SetVal(false)
+			return
+		}
+		s.data[key] = textArg(args[2])
+		delete(s.expires, key)
+		cmd.(*redis.BoolCmd).SetVal(true)
+	case "set":
+		nx := false
+		var expiry time.Time
+		for i := 3; i < len(args); i++ {
+			option := strings.ToLower(textArg(args[i]))
+			if option == "nx" {
+				nx = true
+			}
+			if (option == "px" || option == "ex") && i+1 < len(args) {
+				var n int64
+				fmt.Sscan(textArg(args[i+1]), &n)
+				unit := time.Second
+				if option == "px" {
+					unit = time.Millisecond
+				}
+				expiry = time.Now().Add(time.Duration(n) * unit)
+				i++
+			}
+		}
+		if nx && s.exists(key) {
+			cmd.(*redis.BoolCmd).SetVal(false)
+			return
+		}
+		s.data[key] = textArg(args[2])
+		delete(s.sets, key)
+		delete(s.expires, key)
+		if !expiry.IsZero() {
+			s.expires[key] = expiry
+		}
+		switch c := cmd.(type) {
+		case *redis.BoolCmd:
+			c.SetVal(true)
+		case *redis.StatusCmd:
+			c.SetVal("OK")
+		default:
+			panic(fmt.Sprintf("unexpected set command %T", cmd))
+		}
+	case "exists":
+		var n int64
+		for _, arg := range args[1:] {
+			if s.exists(textArg(arg)) {
+				n++
+			}
+		}
+		cmd.(*redis.IntCmd).SetVal(n)
+	case "del":
+		var n int64
+		for _, arg := range args[1:] {
+			k := textArg(arg)
+			if s.exists(k) {
+				n++
+			}
+			delete(s.data, k)
+			delete(s.sets, k)
+			delete(s.expires, k)
+		}
+		cmd.(*redis.IntCmd).SetVal(n)
+	case "sadd":
+		s.purge(key)
+		if s.sets[key] == nil {
+			s.sets[key] = map[string]bool{}
+		}
+		var n int64
+		for _, arg := range args[2:] {
+			value := textArg(arg)
+			if !s.sets[key][value] {
+				n++
+			}
+			s.sets[key][value] = true
+		}
+		cmd.(*redis.IntCmd).SetVal(n)
+	case "srem":
+		s.purge(key)
+		var n int64
+		for _, arg := range args[2:] {
+			value := textArg(arg)
+			if s.sets[key][value] {
+				n++
+				delete(s.sets[key], value)
+			}
+		}
+		cmd.(*redis.IntCmd).SetVal(n)
+	case "smembers":
+		s.purge(key)
+		result := []string{}
+		for value := range s.sets[key] {
+			result = append(result, value)
+		}
+		cmd.(*redis.StringSliceCmd).SetVal(result)
+	case "expire":
+		ok := s.exists(key)
+		if ok {
+			var n int64
+			fmt.Sscan(textArg(args[2]), &n)
+			s.expires[key] = time.Now().Add(time.Duration(n) * time.Second)
+		}
+		cmd.(*redis.BoolCmd).SetVal(ok)
+	case "eval":
+		script := textArg(args[1])
+		var keyCount int
+		fmt.Sscan(textArg(args[2]), &keyCount)
+		keys := args[3 : 3+keyCount]
+		values := args[3+keyCount:]
+		switch {
+		case strings.Contains(script, "auth-publish-family-v1"):
+			revoked, user, family := textArg(keys[0]), textArg(keys[1]), textArg(keys[2])
+			s.purge(revoked)
+			s.purge(user)
+			s.purge(family)
+			version := s.data[user]
+			if version == "" {
+				version = "0"
+			}
+			prior := s.data[family]
+			if s.exists(revoked) || textArg(values[0]) != "" && version != textArg(values[1]) || prior != "" && prior != textArg(values[2]) {
+				cmd.(*redis.Cmd).SetVal(int64(0))
+				return
+			}
+			var seconds int64
+			fmt.Sscan(textArg(values[3]), &seconds)
+			s.data[family] = textArg(values[2])
+			s.expires[family] = time.Now().Add(time.Duration(seconds) * time.Second)
+			for _, index := range []int{3, 4} {
+				if index == 4 && textArg(values[5]) == "" {
+					continue
+				}
+				key := textArg(keys[index])
+				s.data[key] = textArg(values[4])
+				s.expires[key] = s.expires[family]
+			}
+			cmd.(*redis.Cmd).SetVal(int64(1))
+		case strings.Contains(script, "auth-rate-limit-v1"):
+			key := textArg(keys[0])
+			s.purge(key)
+			var count int64
+			fmt.Sscan(s.data[key], &count)
+			count++
+			s.data[key] = fmt.Sprint(count)
+			if count == 1 {
+				s.expires[key] = time.Now().Add(time.Minute)
+			}
+			cmd.(*redis.Cmd).SetVal(count)
+		case strings.Contains(script, `redis.call("get", KEYS[1]) == ARGV[1]`):
+			lock, value := textArg(keys[0]), textArg(values[0])
+			s.purge(lock)
+			var n int64
+			if s.data[lock] == value {
+				delete(s.data, lock)
+				delete(s.expires, lock)
+				n = 1
+			}
+			cmd.(*redis.Cmd).SetVal(n)
+		default:
+			cmd.SetErr(fmt.Errorf("unsupported audit Lua"))
+		}
+
+	default:
+		cmd.SetErr(fmt.Errorf("unsupported audit Redis command %s", name))
+	}
+}

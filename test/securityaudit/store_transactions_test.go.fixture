@@ -1,0 +1,163 @@
+package store
+
+import (
+	"auth-server/internal"
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// This driver checks repository transaction boundaries and models the table
+// lock; it does not claim to validate PostgreSQL's actual locking engine.
+type transactionState struct {
+	mu         sync.Mutex
+	admins     map[int64]bool
+	failCommit bool
+}
+
+var currentTransactionState *transactionState
+
+type transactionDriver struct{}
+type transactionConn struct {
+	state  *transactionState
+	locked bool
+	admins map[int64]bool
+}
+type transactionTx struct{ conn *transactionConn }
+
+func init() { sql.Register("audit-tx", transactionDriver{}) }
+func (transactionDriver) Open(string) (driver.Conn, error) {
+	return &transactionConn{state: currentTransactionState}, nil
+}
+func (c *transactionConn) Prepare(string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("unexpected prepare")
+}
+func (c *transactionConn) Close() error              { return nil }
+func (c *transactionConn) Begin() (driver.Tx, error) { return &transactionTx{c}, nil }
+func (c *transactionConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if query == `LOCK TABLE auth_admin IN SHARE ROW EXCLUSIVE MODE` {
+		c.state.mu.Lock()
+		c.locked = true
+		c.admins = make(map[int64]bool)
+		for id, v := range c.state.admins {
+			c.admins[id] = v
+		}
+		return driver.RowsAffected(0), nil
+	}
+	if !c.locked {
+		return nil, fmt.Errorf("mutation outside locked transaction: %s", query)
+	}
+	if strings.HasPrefix(query, "DELETE FROM auth_admin") || strings.HasPrefix(query, "DELETE FROM auth_user WHERE") {
+		delete(c.admins, args[0].Value.(int64))
+	}
+	if strings.HasPrefix(query, "DELETE FROM") {
+		return driver.RowsAffected(1), nil
+	}
+	return nil, fmt.Errorf("unexpected exec: %s", query)
+}
+func (c *transactionConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if !c.locked {
+		return nil, fmt.Errorf("administrator count before transaction lock")
+	}
+	if strings.HasPrefix(query, "SELECT EXISTS") {
+		return &transactionRows{value: c.admins[args[0].Value.(int64)]}, nil
+	}
+	if query == `SELECT COUNT(*) FROM auth_admin` {
+		return &transactionRows{value: int64(len(c.admins))}, nil
+	}
+	return nil, fmt.Errorf("unexpected query: %s", query)
+}
+func (tx *transactionTx) Commit() error {
+	c := tx.conn
+	if !c.locked {
+		return fmt.Errorf("commit without lock")
+	}
+	defer func() { c.locked = false; c.state.mu.Unlock() }()
+	if c.state.failCommit {
+		return fmt.Errorf("injected commit failure")
+	}
+	c.state.admins = c.admins
+	return nil
+}
+func (tx *transactionTx) Rollback() error {
+	c := tx.conn
+	if c.locked {
+		c.locked = false
+		c.state.mu.Unlock()
+	}
+	return nil
+}
+
+type transactionRows struct {
+	value driver.Value
+	done  bool
+}
+
+func (r *transactionRows) Columns() []string { return []string{"value"} }
+func (r *transactionRows) Close() error      { return nil }
+func (r *transactionRows) Next(values []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	values[0] = r.value
+	r.done = true
+	return nil
+}
+
+func transactionFixture(t *testing.T, admins map[int64]bool) *transactionState {
+	t.Helper()
+	state := &transactionState{admins: admins}
+	currentTransactionState = state
+	db, err := sql.Open("audit-tx", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := internal.DB
+	internal.DB = sqlx.NewDb(db, "audit-tx")
+	t.Cleanup(func() { internal.DB = old; db.Close() })
+	return state
+}
+func TestConcurrentAdminAndUserDeletionPreservesLastAdmin(t *testing.T) {
+	state := transactionFixture(t, map[int64]bool{1: true, 2: true})
+	results := make(chan error, 2)
+	go func() { results <- DeleteAdmin(context.Background(), 1) }()
+	go func() { results <- (&DbUserStore{}).Delete(2) }()
+	successes, blocked := 0, 0
+	for range 2 {
+		err := <-results
+		if err == nil {
+			successes++
+		} else if errors.Is(err, ErrLastAdmin) {
+			blocked++
+		} else {
+			t.Fatal(err)
+		}
+	}
+	if successes != 1 || blocked != 1 || len(state.admins) != 1 {
+		t.Fatalf("success=%d blocked=%d remaining=%d", successes, blocked, len(state.admins))
+	}
+}
+func TestAdminDeletionRollsBackAndReportsCommitFailure(t *testing.T) {
+	state := transactionFixture(t, map[int64]bool{1: true, 2: true})
+	state.failCommit = true
+	if err := DeleteAdmin(context.Background(), 1); err == nil {
+		t.Fatal("commit failure hidden")
+	}
+	if len(state.admins) != 2 {
+		t.Fatal("failed transaction changed administrators")
+	}
+	if err := (&DbUserStore{}).Delete(2); err == nil {
+		t.Fatal("user deletion commit failure hidden")
+	}
+	if len(state.admins) != 2 {
+		t.Fatal("failed cascading user deletion changed administrators")
+	}
+}

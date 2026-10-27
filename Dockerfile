@@ -1,5 +1,5 @@
 # Build the management SPA first so it can be embedded into the Go binary.
-FROM node:22-alpine AS web
+FROM node:22-alpine3.22 AS web
 WORKDIR /src
 ARG NPM_REGISTRY=https://registry.npmjs.org
 RUN corepack enable \
@@ -23,7 +23,12 @@ COPY . .
 COPY --from=web /src/dist ./auth-server-webui/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -tags embedspa -a -installsuffix cgo -o auth-server .
 
-FROM alpine:latest
+FROM alpine:3.22
+
+RUN apk add --no-cache ca-certificates \
+ && addgroup -S -g 10001 auth \
+ && adduser -S -D -H -u 10001 -G auth auth
+WORKDIR /app
 
 COPY --from=builder /app/auth-server .
 COPY --from=builder /app/template ./template/
@@ -31,5 +36,6 @@ COPY --from=builder /app/assets ./assets/
 COPY placeholder.jpg .
 
 ENV GIN_MODE=release
+USER 10001:10001
 EXPOSE 8080
 CMD ["./auth-server"]

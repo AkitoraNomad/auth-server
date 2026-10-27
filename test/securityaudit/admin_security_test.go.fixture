@@ -1,0 +1,65 @@
+package admin
+
+import (
+	"context"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/go-oauth2/oauth2/v4"
+)
+
+type recentManager struct {
+	oauth2.Manager
+	recent bool
+}
+
+func (m recentManager) RecentlyAuthenticated(context.Context, string) bool { return m.recent }
+
+func TestSensitiveWritesRequireRecentAuthentication(t *testing.T) {
+	for _, recent := range []bool{true, false} {
+		for _, method := range []string{"GET", "POST", "DELETE"} {
+			router := gin.New()
+			router.Use(RequireRecentAuthentication(recentManager{recent: recent}))
+			router.Any("/resource", func(c *gin.Context) { c.Status(204) })
+			request := httptest.NewRequest(method, "/resource", nil)
+			request.Header.Set("Authorization", "Bearer fixture")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			expected := 204
+			if method != "GET" && !recent {
+				expected = 403
+			}
+			if response.Code != expected {
+				t.Fatalf("recent=%v method=%s got=%d", recent, method, response.Code)
+			}
+		}
+	}
+}
+func TestAdminCreationRejectsWeakPasswordBeforeStoreAccess(t *testing.T) {
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest("POST", "/api/admin/users", strings.NewReader(`{"email":"fixture@example.invalid","password":"short"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	PostUserAPI()(c)
+	if response.Code != 400 {
+		t.Fatalf("weak password returned %d", response.Code)
+	}
+}
+func TestClientPolicyRejectsImplicitAndNonLoopbackHTTP(t *testing.T) {
+	if _, err := normalizeGrantTypes([]string{"implicit"}, false); err == nil {
+		t.Fatal("implicit registration accepted")
+	}
+	if _, err := normalizeRedirectURIs([]string{"http://remote.example.invalid/callback"}, ""); err == nil {
+		t.Fatal("non-loopback HTTP accepted")
+	}
+	if _, err := normalizeRedirectURIs([]string{"https://user@remote.example.invalid/callback"}, ""); err == nil {
+		t.Fatal("redirect userinfo accepted")
+	}
+	for _, uri := range []string{"https://app.example.invalid/callback", "http://127.0.0.1:5173/callback", "http://[::1]:5173/callback"} {
+		if _, err := normalizeRedirectURIs([]string{uri}, ""); err != nil {
+			t.Errorf("safe redirect rejected: %s: %v", uri, err)
+		}
+	}
+}

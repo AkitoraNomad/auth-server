@@ -3,6 +3,11 @@
   "description": "Configuration for the auth server.",
   "type": "object",
   "properties": {
+	"trusted-proxies": {
+	  "type": "array",
+	  "items": { "type": "string" },
+	  "description": "Explicit proxy IPs/CIDRs allowed to supply X-Forwarded-For. Empty by default; configure only actual trusted proxies."
+	},
     "host": {
       "type": "string",
       "description": "The hostname or IP address where the application server listens."
@@ -19,7 +24,10 @@
       "type": "object",
       "properties": {
         "host": { "type": "string" },
-        "port": { "type": "string" }
+        "port": { "type": "string" },
+        "username": { "type": "string" },
+        "password": { "type": "string", "description": "Redis credential; supports environment substitution." },
+        "tls": { "type": "boolean", "default": false, "description": "Require verified Redis TLS (minimum TLS 1.2)." }
       },
       "required": ["host", "port"],
       "description": "Redis connection used for sessions and token storage."

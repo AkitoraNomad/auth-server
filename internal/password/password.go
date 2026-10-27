@@ -26,6 +26,19 @@ var (
 	errIncompatibleVersion = errors.New("incompatible argon2 version")
 )
 
+// Bound aggregate Argon2 memory across all handlers, including admin creation
+// and dummy verifications. Reject overload instead of queueing unbounded work.
+var hashSlots = make(chan struct{}, 4)
+
+func acquireHashSlot() bool {
+	select {
+	case hashSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
 var dummyHash = func() string {
 	hash, err := Hash("not-a-real-password")
 	if err != nil {
@@ -42,6 +55,10 @@ func Hash(plain string) (string, error) {
 	if len(plain) > maxPasswordBytes {
 		return "", errors.New("password is too long")
 	}
+	if !acquireHashSlot() {
+		return "", errors.New("password service busy")
+	}
+	defer func() { <-hashSlots }()
 
 	salt := make([]byte, saltLength)
 	if _, err := rand.Read(salt); err != nil {
@@ -74,6 +91,10 @@ func Verify(encoded, plain string) bool {
 		len(salt) < 8 || len(salt) > 64 || len(expected) < 16 || len(expected) > 64 {
 		return false
 	}
+	if !acquireHashSlot() {
+		return false
+	}
+	defer func() { <-hashSlots }()
 	actual := argon2.IDKey([]byte(plain), salt, timeCost, memory, threads, uint32(len(expected)))
 	return subtle.ConstantTimeCompare(actual, expected) == 1
 }

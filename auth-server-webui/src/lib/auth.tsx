@@ -133,6 +133,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('anonymous')
   const [error, setError] = useState<string | null>(null)
   const sessionRef = useRef<SessionState | null>(null)
+  const authGenerationRef = useRef(0)
+  const signingOutRef = useRef(false)
   const refreshPromiseRef = useRef<Promise<SessionState | null> | null>(null)
   const exchangeRef = useRef<Map<string, Promise<string | null>>>(new Map())
 
@@ -145,13 +147,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshAccessToken = useCallback(async (): Promise<SessionState | null> => {
     const current = sessionRef.current
-    if (!current?.refreshToken) {
+    if (signingOutRef.current || !current?.refreshToken) {
       return null
     }
     if (refreshPromiseRef.current) {
       return refreshPromiseRef.current
     }
 
+    const generation = authGenerationRef.current
     const promise = (async () => {
       try {
         const token = await postToken(
@@ -168,10 +171,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           scopes: refreshed.scopes.length > 0 ? refreshed.scopes : current.scopes,
           user: current.user,
         }
+        if (generation !== authGenerationRef.current) return null
         setSession(next)
         setError(null)
         return next
       } catch (err) {
+        if (generation !== authGenerationRef.current) return null
         setSession(null)
         setStatus('error')
         setError(errorMessage(err) || 'Your session expired. Please sign in again.')
@@ -311,10 +316,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const logout = useCallback(() => {
-    clearPendingAuthorization()
-    setSession(null)
-    setStatus('anonymous')
-    setError(null)
+    if (signingOutRef.current) return
+    signingOutRef.current = true
+    void (async () => {
+      try {
+        // Finish a refresh already in flight so logout uses its successor.
+        await refreshPromiseRef.current
+        const current = sessionRef.current
+        const token = current?.accessToken
+        authGenerationRef.current += 1
+        // A successful response means the server has invalidated the SSO
+        // session and every existing grant, including concurrent refreshes.
+        let headers: Record<string, string>
+        if (token) {
+          headers = { Authorization: `Bearer ${token}` }
+        } else {
+          const csrfResponse = await fetch(authUrl('/logout'), { credentials: 'include' })
+          if (!csrfResponse.ok) throw new Error('Unable to end the server session.')
+          const payload = await csrfResponse.json() as { data: { csrf_token: string } }
+          headers = { 'X-CSRF-Token': payload.data.csrf_token }
+        }
+        let response = await fetch(authUrl('/logout'), {
+          method: 'POST', credentials: 'include', headers,
+        })
+        // When the SSO cookie has expired, a live refresh token still
+        // represents a grant that must be revoked before reporting success.
+        if (response.status === 401 && current?.refreshToken) {
+          const renewed = await postToken(new URLSearchParams({
+            grant_type: 'refresh_token', client_id: ADMIN_CLIENT_ID,
+            refresh_token: current.refreshToken,
+          }))
+          setSession({ ...sessionFromToken(renewed), user: current.user })
+          response = await fetch(authUrl('/logout'), {
+            method: 'POST', credentials: 'include',
+            headers: { Authorization: `Bearer ${renewed.access_token}` },
+          })
+        }
+        if (!response.ok) throw new Error('Server sign out failed. Please try again.')
+        clearPendingAuthorization()
+        setSession(null)
+        setStatus('anonymous')
+        setError(null)
+      } catch (err) {
+        setError(errorMessage(err))
+      } finally {
+        signingOutRef.current = false
+      }
+    })()
   }, [setSession])
 
   const hasScope = useCallback(

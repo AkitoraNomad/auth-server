@@ -6,6 +6,7 @@ import (
 	storeImpl "auth-server/internal/store"
 	"auth-server/internal/util"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -32,9 +33,7 @@ func InitServer() *server.Server {
 	})
 
 	manager.MustTokenStorage(storeImpl.NewRedisStoreWithCli(internal.Rdb), nil)
-	session.InitManager(
-		session.SetStore(redis.NewRedisStoreWithCli(internal.Rdb)),
-	)
+	session.InitManager(sessionOptions()...)
 	manager.MapAccessGenerate(&ClientConfigTokenGenerate{})
 	manager.MapClientStorage(storeImpl.ClientRepo)
 
@@ -42,7 +41,6 @@ func InitServer() *server.Server {
 		TokenType: "Bearer",
 		AllowedResponseTypes: []oauth2.ResponseType{
 			oauth2.Code,
-			oauth2.Token,
 		},
 		AllowedGrantTypes: []oauth2.GrantType{
 			oauth2.AuthorizationCode,
@@ -54,15 +52,17 @@ func InitServer() *server.Server {
 		},
 		ForcePKCE: true,
 	}
-	boundManager := &clientBoundManager{Manager: manager}
+	boundManager := newClientBoundManager(manager, internal.Rdb)
 	srv := server.NewServer(&oauth2ServerConfig, boundManager)
 	srv.SetClientInfoHandler(clientInfoHandler)
 	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
 	srv.SetClientScopeHandler(clientScopeHandler)
-	srv.SetRefreshingScopeHandler(refreshingScopeHandler)
+	// Refresh scope validation is performed inside clientBoundManager, after
+	// client authentication and replay detection. The library's scope hook
+	// preloads the old token and would bypass replay handling for scoped retries.
 	srv.SetUserAuthorizationHandler(userAuthorizeHandler)
 	srv.SetAuthorizeScopeHandler(scopeHandler)
-	srv.SetResponseTokenHandler(getResponseTokenHandler(manager))
+	srv.SetResponseTokenHandler(getResponseTokenHandler(boundManager))
 	srv.SetInternalErrorHandler(func(err error) (re *errors.Response) {
 		// go-oauth2 does not put ErrInvalidRedirectURI in its public
 		// descriptions map, which would otherwise turn a token request with a
@@ -102,7 +102,6 @@ func preRedirectErrorHandler(w http.ResponseWriter, req *server.AuthorizeRequest
 		"client_id", req.ClientID,
 		"response_type", string(req.ResponseType),
 		"redirect_uri", req.RedirectURI,
-		"state", req.State,
 		"err", err,
 	)
 
@@ -134,11 +133,22 @@ func userAuthorizeHandler(w http.ResponseWriter, r *http.Request) (userID string
 			err = mapErr
 			return
 		}
+	} else if v, ok := uid.(*model.SessionUserInfo); ok {
+		sessionUser = v
 	} else {
 		http.Error(w, "invalid session user info type", http.StatusInternalServerError)
 		return
 	}
+	if sessionUser == nil || sessionUser.User == nil {
+		return "", errors.New("invalid session user")
+	}
 	userID = strconv.FormatInt(sessionUser.User.ID, 10)
+	if !SessionIsActive(r.Context(), sessionUser) {
+		http.Error(w, "user account is not active", http.StatusUnauthorized)
+		return "", errors.New("user account is not active")
+	}
+	*r = *r.WithContext(context.WithValue(r.Context(), authenticatedVersionKey{}, sessionUser.AuthVersion))
+	*r = *r.WithContext(context.WithValue(r.Context(), authenticatedTimeKey{}, sessionUser.LoginAt))
 	return
 }
 
@@ -217,5 +227,19 @@ func updateUserLastLogin(userId string) {
 		}
 	} else {
 		slog.Error("failed to parse user id", "user_id", userId, "err", err)
+	}
+}
+
+func sessionOptions() []session.Option {
+	signKey := sha256.Sum256([]byte(internal.AuthServerConfig.JWT[0].Sec))
+	return []session.Option{
+		session.SetStore(redis.NewRedisStoreWithCli(internal.Rdb)),
+		session.SetExpired(15 * 60),
+		session.SetCookieLifeTime(15 * 60),
+		session.SetSecure(strings.HasPrefix(internal.AuthServerConfig.Issuer, "https://")),
+		session.SetSameSite(http.SameSiteLaxMode),
+		session.SetEnableSIDInURLQuery(false),
+		session.SetEnableSIDInHTTPHeader(false),
+		session.SetSign(signKey[:]),
 	}
 }

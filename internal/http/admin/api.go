@@ -6,14 +6,17 @@ import (
 	adminoauth2 "auth-server/internal/oauth2"
 	"auth-server/internal/password"
 	"auth-server/internal/store"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-oauth2/oauth2/v4"
@@ -131,6 +134,24 @@ func RequireScope(scope string) gin.HandlerFunc {
 	}
 }
 
+func RequireRecentAuthentication(mgr oauth2.Manager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead {
+			c.Next()
+			return
+		}
+		checker, ok := mgr.(interface {
+			RecentlyAuthenticated(context.Context, string) bool
+		})
+		token := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if !ok || !checker.RecentlyAuthenticated(c.Request.Context(), token) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "msg": "Recent sign-in required. Sign out and sign in again before changing security settings."})
+			return
+		}
+		c.Next()
+	}
+}
+
 func GetMeAPI() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		value, ok := c.Get("admin_user_id")
@@ -176,8 +197,8 @@ func PostUserAPI() gin.HandlerFunc {
 			DisplayName string `json:"display_name"`
 			Password    string `json:"password"`
 		}
-		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Email) == "" || req.Password == "" {
-			responseErr(c, http.StatusBadRequest, "email and password required")
+		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Email) == "" || utf8.RuneCountInString(req.Password) < 12 {
+			responseErr(c, http.StatusBadRequest, "email and a password of at least 12 characters are required")
 			return
 		}
 		u := &model.User{Email: strings.TrimSpace(req.Email), DisplayName: strings.TrimSpace(req.DisplayName)}
@@ -211,8 +232,20 @@ func DeleteUserAPI() gin.HandlerFunc {
 			responseErr(c, http.StatusBadRequest, "invalid id")
 			return
 		}
+
 		if err := store.UserRepo.(*store.DbUserStore).Delete(id); err != nil {
+			if errors.Is(err, store.ErrLastAdmin) {
+				responseErr(c, http.StatusConflict, err.Error())
+				return
+			}
 			responseErr(c, http.StatusInternalServerError, err.Error())
+			return
+		}
+		// Also advance the persistent security generation, invalidating existing
+		// codes, token families and SSO sessions for this user.
+		if err := adminoauth2.RevokeUserSessions(c.Request.Context(), id); err != nil {
+			slog.Error("failed to revoke sessions after user deletion", "user_id", id, "err", err)
+			responseErr(c, http.StatusInternalServerError, "user deleted but session revocation failed")
 			return
 		}
 		responseJSON(c, http.StatusOK, nil)
@@ -380,24 +413,24 @@ func DeleteAdminAPI() gin.HandlerFunc {
 			responseErr(c, http.StatusBadRequest, "invalid user_id")
 			return
 		}
-		result, err := internal.DB.Exec(`DELETE FROM auth_admin WHERE user_id = $1`, uid)
+		err = store.DeleteAdmin(c.Request.Context(), uid)
 		if err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			if errors.Is(err, store.ErrLastAdmin) {
+				responseErr(c, http.StatusConflict, err.Error())
+				return
+			}
+			responseErr(c, http.StatusInternalServerError, "failed to remove administrator")
 			return
 		}
-		if affected, _ := result.RowsAffected(); affected == 0 {
-			responseErr(c, http.StatusNotFound, "administrator not found")
-			return
-		}
+
 		responseJSON(c, http.StatusOK, nil)
 	}
 }
 
 // ---------- Sessions ----------
 //
-// A real session/token index is Phase 4. Until then this endpoint only exposes
-// user records and the revoke endpoint returns 501 instead of pretending that a
-// revocation happened.
+// The list exposes user records; revocation invalidates all existing user
+// grants and SSO sessions through the persistent security generation.
 func GetSessionsAPI(_ oauth2.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		users, err := store.UserRepo.(*store.DbUserStore).List()
@@ -411,8 +444,22 @@ func GetSessionsAPI(_ oauth2.Manager) gin.HandlerFunc {
 
 func DeleteSessionAPI(_ oauth2.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		responseErr(c, http.StatusNotImplemented, "session revocation is not implemented until Phase 4")
+		uid, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
+		if err != nil || uid <= 0 {
+			responseErr(c, http.StatusBadRequest, "invalid user_id")
+			return
+		}
+		if err := adminoauth2.RevokeUserSessions(c.Request.Context(), uid); err != nil {
+			responseErr(c, http.StatusServiceUnavailable, "failed to revoke sessions")
+			return
+		}
+		responseJSON(c, http.StatusOK, nil)
 	}
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
 func hashPassword(plain string) ([]byte, error) {
@@ -446,12 +493,18 @@ func normalizeRedirectURIs(input []string, legacyDomain string) (model.TextArray
 	result := make(model.TextArray, 0, len(values))
 	for _, raw := range values {
 		uri := strings.TrimSpace(raw)
+		if !model.ValidRedirectURI(uri) {
+			return nil, errors.New("invalid or insecure redirect_uri: " + raw)
+		}
 		parsed, err := url.Parse(uri)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Fragment != "" {
 			return nil, errors.New("redirect_uri must be an absolute URL without a fragment: " + raw)
 		}
 		if parsed.Scheme != "http" && parsed.Scheme != "https" {
 			return nil, errors.New("redirect_uri must use http or https: " + raw)
+		}
+		if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
+			return nil, errors.New("plain HTTP redirect_uri is only allowed for loopback hosts: " + raw)
 		}
 		if _, ok := seen[uri]; ok {
 			continue
@@ -495,10 +548,10 @@ func normalizeGrantTypes(input []string, public bool) (model.TextArray, error) {
 		if public {
 			values = []string{"authorization_code", "refresh_token"}
 		} else {
-			values = []string{"authorization_code", "client_credentials", "refresh_token", "implicit"}
+			values = []string{"authorization_code", "client_credentials", "refresh_token"}
 		}
 	}
-	allowed := []string{"authorization_code", "client_credentials", "refresh_token", "implicit"}
+	allowed := []string{"authorization_code", "client_credentials", "refresh_token"}
 	seen := make(map[string]struct{}, len(values))
 	result := make(model.TextArray, 0, len(values))
 	for _, raw := range values {

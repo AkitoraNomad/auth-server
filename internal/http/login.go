@@ -3,6 +3,7 @@ package http
 import (
 	"auth-server/internal"
 	"auth-server/internal/model"
+	authoauth2 "auth-server/internal/oauth2"
 	"auth-server/internal/password"
 	"auth-server/internal/render"
 	storeImpl "auth-server/internal/store"
@@ -13,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -59,7 +62,7 @@ func handleLoginPage(c *gin.Context, s session.Store) {
 	setActiveAuthorizeRequest(s, state.ID)
 
 	nextURL := internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
-	if _, ok := s.Get(internal.SessionKeyUserID); ok {
+	if currentSessionUser(c.Request.Context(), s) != nil {
 		_ = s.Save()
 		c.Redirect(http.StatusFound, nextURL)
 		return
@@ -81,12 +84,29 @@ func handleLoginPage(c *gin.Context, s session.Store) {
 		c.String(http.StatusInternalServerError, "failed to save session")
 		return
 	}
-	if err := renderLoginPage(c.Writer, client.DisplayName, nextURL, state.ID, http.StatusUnauthorized, nil); err != nil {
+	token, err := csrfToken(s)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	if err := renderLoginPage(c.Writer, client.DisplayName, nextURL, state.ID, token, http.StatusUnauthorized, nil); err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 	}
 }
 
 func handleJsonLogin(c *gin.Context, s session.Store) {
+	if validateCSRF(c.Request, s) != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	if currentSessionUser(c.Request.Context(), s) != nil {
+		c.AbortWithStatus(http.StatusConflict)
+		return
+	}
+	if strings.ToLower(c.ContentType()) != "application/json" {
+		responseJson(c.Writer, 1, "invalid_request_body")
+		return
+	}
 	req := loginReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseJson(c.Writer, 1, "invalid_request_body")
@@ -96,15 +116,20 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 1, "invalid_request")
 		return
 	}
+	if !allowAuthAttempt(c.Request.Context(), "account:"+req.ProviderType.String()+":"+strings.ToLower(req.LoginKey), 10) {
+		c.Header("Retry-After", "60")
+		c.Status(http.StatusTooManyRequests)
+		return
+	}
 	remoteIp := getIp(c.Request)
-	if err := verifyRequest(req.CfToken, remoteIp); err != nil {
+	if err := verifyRequest(c.Request.Context(), req.CfToken, remoteIp); err != nil {
 		slog.Warn("failed to verify request", "ip", remoteIp)
 		responseJson(c.Writer, 1, "turnstile_verification_failed")
 		return
 	}
 	userInfo, err := storeImpl.UserRepo.GetUserByCredentials(req.LoginKey, req.ProviderType, req.Data, s)
 	if err != nil {
-		slog.Warn("failed to verify credentials", "loginKey", req.LoginKey, "provider", req.ProviderType, "err", err)
+		slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", err)
 		responseJson(c.Writer, 1, "invalid_credentials")
 		return
 	}
@@ -116,11 +141,11 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 			dummy := model.EmailPasswordProviderData{}
 			_ = json.Unmarshal(req.Data, &dummy)
 			password.DummyVerify(dummy.Password)
-			slog.Warn("failed to verify credentials", "loginKey", req.LoginKey, "provider", req.ProviderType, "err", "invalid_credentials")
+			slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", "invalid_credentials")
 			responseJson(c.Writer, 1, "invalid_credentials")
 			return
 		}
-		slog.Warn("unregistered credential", "loginKey", req.LoginKey, "provider", req.ProviderType)
+		slog.Warn("unregistered credential", "provider", req.ProviderType)
 		if err := saveTelegramSessionOnUnregistered(req.Data, s); err != nil {
 			responseJson(c.Writer, 1, err.Error())
 			return
@@ -140,9 +165,29 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		nextURL = internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
 		setActiveAuthorizeRequest(s, state.ID)
 	}
+	// Rotate the session identifier after successful authentication to close
+	// session fixation. Refresh copies the pending OAuth authorization state.
+	version, err := authoauth2.UserSessionVersion(c.Request.Context(), strconv.FormatInt(userInfo.ID, 10))
+	if err != nil {
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.Save(); err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	if rotated, err := session.Refresh(c.Request.Context(), c.Writer, c.Request); err == nil {
+		s = rotated
+	} else {
+		slog.Warn("failed to rotate session after login", "err", err)
+		c.Status(http.StatusInternalServerError)
+		return
+	}
 	sessionUser := model.NewSessionUserInfo(userInfo, req.ProviderType, remoteIp, clientID, time.Now(), map[string]any{
 		"login_key": req.LoginKey,
 	})
+	sessionUser.AuthVersion = version
+	s.Delete(csrfSessionKey)
 	s.Set(internal.SessionKeyUserID, sessionUser)
 	if err := s.Save(); err != nil {
 		responseJson(c.Writer, 1, err)
@@ -155,19 +200,52 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 }
 
 func getIp(r *http.Request) string {
-	remoteIp := r.Header.Get("CF-Connecting-IP")
-	if remoteIp == "" {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		remoteIp = host
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	return remoteIp
+	if !trustedProxy(host) {
+		return host
+	}
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded == "" || len(forwarded) > 4096 {
+		return host
+	}
+	chain := strings.Split(forwarded, ",")
+	for i := len(chain) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(chain[i])
+		if net.ParseIP(ip) == nil {
+			return host
+		}
+		if i == 0 || !trustedProxy(ip) {
+			return ip
+		}
+	}
+	return host
 }
 
-func renderLoginPage(w http.ResponseWriter, clientName, nextURL, requestID string, code int, err error) error {
+func trustedProxy(address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	for _, value := range internal.AuthServerConfig.TrustedProxies {
+		if candidate := net.ParseIP(value); candidate != nil && candidate.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderLoginPage(w http.ResponseWriter, clientName, nextURL, requestID, csrf string, code int, err error) error {
 	data := map[string]any{
 		"client_name": clientName,
 		"next_url":    nextURL,
 		"request_id":  requestID,
+		"csrf_token":  csrf,
 		"site_key":    internal.AuthServerConfig.Cloudflare.Turnstile.Key,
 		"bot_name":    internal.AuthServerConfig.Telegram.BotName,
 	}
@@ -180,14 +258,22 @@ func renderLoginPage(w http.ResponseWriter, clientName, nextURL, requestID strin
 // saveTelegramSessionOnUnregistered validates Telegram credential and stores it into session
 // so that the registration flow can proceed. It mirrors the previous inline logic.
 func saveTelegramSessionOnUnregistered(tgData json.RawMessage, s session.Store) error {
+	if internal.AuthServerConfig.Telegram.BotToken == "" {
+		return fmt.Errorf("telegram login is disabled")
+	}
 	botTokenDigest := util.DigestSHA256(internal.AuthServerConfig.Telegram.BotToken)
-	if !util.ValidateTelegramCredential(tgData, botTokenDigest) {
-		slog.Warn("Invalid Telegram Credentials")
+	tg, err := util.ParseTelegramCredential(tgData, botTokenDigest, time.Now())
+	if err != nil {
+		slog.Warn("invalid telegram credential", "err", err)
 		return fmt.Errorf("invalid_telegram_credentials")
 	}
-	var tgUser model.TelegramUser
-	if err := json.Unmarshal(tgData, &tgUser); err != nil {
-		return err
+	tgUser := model.TelegramUser{
+		Id:        tg.ID,
+		FirstName: tg.FirstName,
+		LastName:  tg.LastName,
+		Username:  tg.Username,
+		PhotoUrl:  tg.PhotoURL,
+		AuthDate:  tg.AuthDate,
 	}
 	s.Set(internal.SessionKeyTelegramData, tgUser)
 	if err := s.Save(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jmoiron/sqlx"
 	"log/slog"
 	"net/url"
 	"slices"
@@ -139,6 +140,9 @@ func buildAdminClientSeed(clientID int64, displayName string, redirectURIs, scop
 	cleanURIs := make([]string, 0, len(redirectURIs))
 	for _, raw := range redirectURIs {
 		uri := strings.TrimSpace(raw)
+		if !model.ValidRedirectURI(uri) {
+			return adminClientSeed{}, fmt.Errorf("insecure admin redirect URI: %q", raw)
+		}
 		u, err := url.Parse(uri)
 		if err != nil || u.Scheme == "" || u.Host == "" || u.Fragment != "" {
 			return adminClientSeed{}, fmt.Errorf("invalid admin redirect URI: %q", raw)
@@ -207,4 +211,45 @@ func buildAdminClientSeed(clientID int64, displayName string, redirectURIs, scop
 		RedirectURIs: model.TextArray(cleanURIs),
 		GrantTypes:   model.TextArray(cleanGrants),
 	}, nil
+}
+
+var ErrLastAdmin = errors.New("cannot remove the last administrator")
+
+// All administrator removals (including user deletion and its cascading FK)
+// serialize with administrator inserts/removals before counting. The lock is
+// held until commit, so concurrent removals cannot both observe two admins.
+func protectLastAdmin(tx *sqlx.Tx, userID int64) error {
+	if _, err := tx.Exec(`LOCK TABLE auth_admin IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	var target bool
+	if err := tx.Get(&target, `SELECT EXISTS (SELECT 1 FROM auth_admin WHERE user_id = $1)`, userID); err != nil {
+		return err
+	}
+	if !target {
+		return nil
+	}
+	var count int
+	if err := tx.Get(&count, `SELECT COUNT(*) FROM auth_admin`); err != nil {
+		return err
+	}
+	if count <= 1 {
+		return ErrLastAdmin
+	}
+	return nil
+}
+
+func DeleteAdmin(ctx context.Context, userID int64) error {
+	tx, err := internal.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := protectLastAdmin(tx, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_admin WHERE user_id = $1`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

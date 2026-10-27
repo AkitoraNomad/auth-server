@@ -22,7 +22,8 @@ CREATE TABLE auth.auth_user_provider (
     provider_type TEXT NOT NULL,
     provider_data JSONB,
     created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ
+    updated_at TIMESTAMPTZ,
+    UNIQUE (provider_type, login_key)
 );
 
 CREATE TABLE auth.auth_client (
@@ -34,7 +35,7 @@ CREATE TABLE auth.auth_client (
     token_type TEXT,
     is_public BOOLEAN NOT NULL DEFAULT FALSE,
     redirect_uris TEXT[] NOT NULL DEFAULT '{}',
-    grant_types TEXT[] NOT NULL DEFAULT '{authorization_code,client_credentials,refresh_token,implicit}',
+    grant_types TEXT[] NOT NULL DEFAULT '{authorization_code,client_credentials,refresh_token}',
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ
 );
@@ -45,3 +46,7 @@ CREATE TABLE auth.auth_admin (
     created_at TIMESTAMPTZ DEFAULT now(),
     updated_at TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX auth_user_email_lower_key
+    ON auth.auth_user (lower(email))
+    WHERE email IS NOT NULL;

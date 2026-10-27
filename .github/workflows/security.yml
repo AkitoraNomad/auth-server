@@ -1,0 +1,40 @@
+name: Security regression
+
+on:
+  workflow_call:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod download
+      - run: go test -race ./...
+      - run: go vet ./...
+      - name: Isolated security regression using locked dependencies
+        run: GOMODCACHE="$(go env GOMODCACHE)" GOCACHE="$(go env GOCACHE)" python3 test/securityaudit/run.py
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.3.0 --activate
+      - run: pnpm install --frozen-lockfile
+        working-directory: auth-server-webui
+      - run: pnpm lint && pnpm build && pnpm audit --audit-level=moderate
+        working-directory: auth-server-webui

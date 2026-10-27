@@ -62,7 +62,7 @@ func (m *DbClientStore) Create(ctx context.Context, c *model.AuthClient) error {
 		c.RedirectURIs = model.TextArray{c.Domain}
 	}
 	if len(c.GrantTypes) == 0 {
-		c.GrantTypes = model.TextArray{"authorization_code", "client_credentials", "refresh_token", "implicit"}
+		c.GrantTypes = model.TextArray{"authorization_code", "client_credentials", "refresh_token"}
 	}
 
 	rows, err := internal.DB.NamedQueryContext(ctx, `insert into auth_client

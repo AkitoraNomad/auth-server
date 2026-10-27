@@ -25,7 +25,7 @@ pnpm install
 pnpm dev
 ```
 
-打开 `http://localhost:5173/admin-page/`。需要后端、PostgreSQL、Redis 和 Turnstile 配置；首位管理员通过 [../db/seed_admin.example.sql](../db/seed_admin.example.sql) 手工创建。
+打开 `http://localhost:5173/admin-page/`。后端设置 `OAUTH_ISSUER=http://localhost:5173`，使同源校验与浏览器 origin 一致；开发代理也转发 `/logout`。需要后端、PostgreSQL、Redis 和 Turnstile 配置；首位管理员通过 [../db/seed_admin.example.sql](../db/seed_admin.example.sql) 手工创建。
 
 开发端口固定为 5173，以便回调 URL 与后端精确匹配。若修改端口，需要同步修改后端 `ADMIN_CLIENT_REDIRECT_URIS` 和 `.env` 中的回调覆盖值。
 

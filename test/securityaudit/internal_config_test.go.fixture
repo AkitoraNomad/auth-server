@@ -1,0 +1,17 @@
+package internal
+
+import "testing"
+
+func TestConfigResolvesStringArraysAndRedisCredentials(t *testing.T) {
+	t.Setenv("AUDIT_PROXY", "127.0.0.1/32")
+	t.Setenv("AUDIT_CALLBACK", "https://app.example.invalid/callback")
+	t.Setenv("AUDIT_REDIS_PASSWORD", "fixture-password")
+	config := Config{TrustedProxies: []string{"${AUDIT_PROXY}"}}
+	config.Admin.RedirectURIs = []string{"${AUDIT_CALLBACK}"}
+	config.Admin.GrantTypes = []string{"authorization_code", "refresh_token"}
+	config.Redis.Password = "${AUDIT_REDIS_PASSWORD}"
+	resolveEnv(&config)
+	if config.TrustedProxies[0] != "127.0.0.1/32" || config.Admin.RedirectURIs[0] != "https://app.example.invalid/callback" || config.Redis.Password != "fixture-password" {
+		t.Fatal("configuration substitution failed")
+	}
+}

@@ -26,11 +26,15 @@ type JWTConfig struct {
 }
 
 type Config struct {
-	Host  string `yaml:"host"`
-	Port  int    `yaml:"port"`
-	Redis struct {
-		Host string `yaml:"host"`
-		Port string `yaml:"port"`
+	TrustedProxies []string `yaml:"trusted-proxies"`
+	Host           string   `yaml:"host"`
+	Port           int      `yaml:"port"`
+	Redis          struct {
+		Host     string `yaml:"host"`
+		Port     string `yaml:"port"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+		TLS      bool   `yaml:"tls"`
 	} `yaml:"redis"`
 	DB           string      `yaml:"db"`
 	DBSearchPath string      `yaml:"db-search-path"`
@@ -99,7 +103,7 @@ func setDefaultValues() {
 	if AuthServerConfig.DB == "" {
 		// Default PostgreSQL DSN (disable ssl for local dev)
 		AuthServerConfig.DB = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-		slog.Debug("set default db address", "dsn", AuthServerConfig.DB)
+		slog.Debug("set default local database address")
 	}
 	if len(AuthServerConfig.JWT) == 0 {
 		keySize := 2048
@@ -217,7 +221,13 @@ func resolveStruct(v reflect.Value) {
 			resolveString(field, fieldType.Name)
 		case reflect.Slice:
 			for j := 0; j < field.Len(); j++ {
-				resolveStruct(field.Index(j))
+				element := field.Index(j)
+				if element.Kind() == reflect.Struct {
+					resolveStruct(element)
+				}
+				if element.Kind() == reflect.String {
+					resolveString(element, fieldType.Name)
+				}
 			}
 		case reflect.Struct:
 			resolveStruct(field)

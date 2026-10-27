@@ -2,7 +2,10 @@ package model
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"slices"
+	"strings"
 
 	"github.com/go-oauth2/oauth2/v4"
 )
@@ -81,13 +84,27 @@ func (c *AuthClient) HasScope(scope string) bool {
 // AllowsRedirectURI performs exact redirect URI matching. Existing clients that
 // predate redirect_uris keep working through the legacy single domain value.
 func (c *AuthClient) AllowsRedirectURI(uri string) bool {
-	if uri == "" {
+	if !ValidRedirectURI(uri) {
 		return false
 	}
 	if len(c.RedirectURIs) > 0 {
 		return slices.Contains(c.RedirectURIs, uri)
 	}
 	return c.Domain != "" && c.Domain == uri
+}
+
+// ValidRedirectURI applies to stored clients as well as new configuration.
+func ValidRedirectURI(uri string) bool {
+	u, err := url.Parse(uri)
+	if err != nil || u.Host == "" || u.User != nil || strings.Contains(uri, "#") || (u.Scheme != "https" && u.Scheme != "http") {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
 
 // AllowsGrantType reports whether the client may use a grant type. An empty

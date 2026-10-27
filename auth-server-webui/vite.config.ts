@@ -16,6 +16,7 @@ export default defineConfig({
       '/assets': backend,
       '/oauth2': backend,
       '/login': backend,
+      '/logout': backend,
       '/auth': backend,
       '/api': backend,
       '/registration': backend,

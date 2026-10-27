@@ -5,8 +5,6 @@ import (
 	storeImpl "auth-server/internal/store"
 	"context"
 	"net/http"
-	"slices"
-	"strings"
 
 	"github.com/go-oauth2/oauth2/v4"
 	oerrors "github.com/go-oauth2/oauth2/v4/errors"
@@ -65,36 +63,6 @@ func clientScopeHandler(tgr *oauth2.TokenGenerateRequest) (bool, error) {
 	}
 	requested, err := model.ParseScopes(tgr.Scope)
 	if err != nil {
-		return false, nil
-	}
-	for _, scope := range requested {
-		if !cliHasScope(cli, scope.Name) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func refreshingScopeHandler(tgr *oauth2.TokenGenerateRequest, oldScope string) (bool, error) {
-	if strings.TrimSpace(tgr.Scope) == "" {
-		return true, nil
-	}
-	requested, err := model.ParseScopes(tgr.Scope)
-	if err != nil {
-		return false, nil
-	}
-	old := strings.Fields(oldScope)
-	for _, scope := range requested {
-		if !slices.Contains(old, scope.Name) {
-			return false, nil
-		}
-	}
-	// A refresh must also stay inside the client's current allow-list.
-	cli, err := storeImpl.ClientRepo.GetByID(context.Background(), tgr.ClientID)
-	if err != nil {
-		return false, err
-	}
-	if cli == nil {
 		return false, nil
 	}
 	for _, scope := range requested {

@@ -2,6 +2,17 @@
 
 Go OAuth2 授权服务器，使用 PostgreSQL、Redis，管理前端位于 [auth-server-webui/](auth-server-webui/)。
 
+## 安全修复与升级（2026-10-27）
+
+严格复审的修复、回归结果和未验证边界见 [修复复测报告](docs/security-remediation-2026-10-27.md)。本次升级会拒绝没有安全元数据的旧授权码、Access/Refresh Token 和 SSO Session，需要重新登录。
+
+- 现有数据库需应用 [002_identity_constraints.sql](db/migrations/002_identity_constraints.sql)；先处理重复邮箱、重复外部身份，迁移遇到重复记录会回滚。不要对已有数据运行会删表的 `db/postgres.sql`。
+- 退出管理端会撤销该用户所有现有授权和 SSO 会话。管理员写操作要求最近 15 分钟内通过凭据登录；普通刷新不会延长这个窗口。
+- 生产只允许 HTTPS 回调；本机 HTTP 例外限 loopback。Introspection 仅允许机密客户端查询自身令牌；UserInfo 支持带 `profile` scope 的 Bearer Token。
+- `issuer` 必须是浏览器使用的公网 origin。Vite 代理开发时设置 `OAUTH_ISSUER=http://localhost:5173`；Go 独立托管本机页面时用 `http://localhost:8080`。
+- 反代部署通过 `trusted-proxies` 明确列出实际代理 IP/CIDR，登录限速才会使用这些代理提供的 `X-Forwarded-For`。默认忽略转发头，不能配置任意来源为可信代理。
+- Docker 运行用户为 UID/GID `10001:10001`；挂载配置、密钥应对该用户可读。Redis 可配置 `username`、`password` 和 `tls: true`，需保留令牌和撤销元数据。
+
 ## 授权流程
 
 ```mermaid
@@ -138,9 +149,10 @@ psql "$DB" -f db/postgres.sql
 
 ```bash
 psql "$DB" -f db/migrations/001_phase1_admin_spa.sql
+psql "$DB" -f db/migrations/002_identity_constraints.sql
 ```
 
-迁移会为 `auth_client` 增加 `is_public`、`redirect_uris`、`grant_types`，并为 `auth_admin.user_id` 增加唯一约束。若已有重复管理员记录，迁移会失败，需要先人工去重。
+迁移会为 `auth_client` 增加 `is_public`、`redirect_uris`、`grant_types`，并为 `auth_admin.user_id` 增加唯一约束。`002_identity_constraints.sql` 还会为邮箱（大小写不敏感）和 `(provider_type, login_key)` 增加唯一索引，并移除隐式 implicit grant。若已有重复邮箱、重复外部身份或重复管理员记录，迁移会失败，需要先备份并人工去重。
 
 ### 2. 启动后端
 
@@ -149,7 +161,7 @@ psql "$DB" -f db/migrations/001_phase1_admin_spa.sql
 ```bash
 export ADMIN_CLIENT_ID=2
 export ADMIN_CLIENT_REDIRECT_URIS=http://localhost:5173/admin-page/callback,http://127.0.0.1:5173/admin-page/callback,http://localhost:8080/admin-page/callback,http://127.0.0.1:8080/admin-page/callback
-export OAUTH_ISSUER=http://localhost:8080
+export OAUTH_ISSUER=http://localhost:5173 # Vite 代理开发；Go 独立托管时改为 8080
 go run .
 ```
 
@@ -226,10 +238,10 @@ go build -tags embedspa -o auth-server .
 
 ### Phase 2：授权与登录安全
 
-- [ ] 刷新时校验客户端身份和 Token 归属（当前跨客户端 refresh 可通过）；授权码、客户端凭据、刷新流程统一限制 Scope/授权类型。
-- [ ] `POST /login` 已登录守卫：session 已有用户时拒绝/复用登录，禁止 stale 登录页切换账号。
-- [ ] Telegram 签名 ID 必须与登录账户绑定，检查 `auth_date` 有效期及异常输入。
-- [ ] 授权确认增加请求绑定、CSRF 防护及拒绝流程，不直接信任 `consented`。
+- [x] 刷新时校验客户端身份和 Token 归属；授权码、客户端凭据、刷新流程统一限制 Scope/授权类型。
+- [x] `POST /login` 已登录守卫：session 已有用户时拒绝/复用登录，禁止 stale 登录页切换账号。
+- [x] Telegram 签名 ID 必须与登录账户绑定，检查 `auth_date` 有效期及异常输入。
+- [x] 授权确认增加请求绑定、CSRF 防护及拒绝流程，不直接信任 `consented`。
 - [x] 替换无盐 SHA-256 密码存储：新密码使用 Argon2id（随机 salt、PHC 编码）；由于项目未投产，不做旧哈希兼容。
 - [ ] **测试**：错误 PKCE、授权码重放、过期 Token、回调绕过、刷新凭据错误/跨客户端刷新、Scope 扩大、Telegram 身份错配。
 
@@ -240,15 +252,15 @@ go build -tags embedspa -o auth-server .
 - [x] 修复客户端创建显式插入零值 ID，返回真实标识；统一 JSON DTO，修复字段大小写与 snake_case 不一致，列表不返回 secret。
 - [ ] 用户：编辑、启停、密码重置及关联 Token/Session 失效。
 - [ ] 客户端：编辑、启停、多回调地址、Scope、grant_types；防止误删或破坏内置管理客户端（当前仅禁止删除 ID=2）。
-- [ ] 管理员：重复添加、无效用户和最后一名管理员保护（当前只依赖唯一约束）。
+- [x] 管理员：唯一约束及外键校验；删除管理员和删除用户在事务锁内保护最后一名管理员。
 - [ ] 列表分页/查询、统一错误反馈；处理事务提交失败及登录标识唯一约束。
 - [ ] **测试**：连续创建客户端、DTO 契约、状态变更、权限拒绝及管理员变更。
 
 ### Phase 4：会话与 Token
 
 - [ ] 建立用户/客户端/Token/Session 索引，查询真实活跃会话和过期信息。
-- [ ] 实现单会话/用户撤销和强制下线，清理 access token、refresh token 及必要的登录 Session；失败不得返回成功。
-- [ ] 实现服务端退出，区分退出管理客户端与统一登录会话；前端按 `expires_in` 续期，协调并发刷新，失败后重新认证。
+- [x] 实现用户级强制下线：通过安全版本号使现有 Token、授权码及 SSO Session 失效；单会话管理仍待实现。
+- [x] 实现服务端全局退出及管理端接入；前端协调刷新与退出。按客户端或单会话退出尚未实现。
 - [ ] 完善刷新轮换、旧 Token 失效及重放检测，与用户禁用、客户端停用和管理员变更联动。
 - [ ] **测试**：撤销后访问/刷新、退出后访问/重新登录、到期和多会话下线。
 

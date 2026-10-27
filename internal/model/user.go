@@ -20,6 +20,7 @@ type User struct {
 
 // SessionUserInfo 用于在会话中存储当前登录用户的上下文数据
 type SessionUserInfo struct {
+	AuthVersion   string         `json:"auth_version"`
 	User          *User          `json:"user"`
 	ProviderType  *ProviderType  `json:"provider_type,omitempty"`
 	LoginIP       string         `json:"login_ip,omitempty"`

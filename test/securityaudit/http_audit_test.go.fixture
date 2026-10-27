@@ -1,0 +1,392 @@
+package http
+
+import (
+	"auth-server/internal"
+	"auth-server/internal/model"
+	adminoauth2 "auth-server/internal/oauth2"
+	"auth-server/internal/store"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/gin-gonic/gin"
+	oauth "github.com/go-oauth2/oauth2/v4"
+	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/go-oauth2/oauth2/v4/models"
+	"github.com/go-oauth2/oauth2/v4/server"
+	"github.com/go-session/session/v3"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+)
+
+type fixtureClients map[string]oauth.ClientInfo
+type httpActiveUserRepo struct{ store.UserStore }
+
+func (httpActiveUserRepo) GetUserByID(id int64) (*model.User, error) { return &model.User{ID: id}, nil }
+
+func (c fixtureClients) GetByID(_ context.Context, id string) (oauth.ClientInfo, error) {
+	return c[id], nil
+}
+func introspectionServer(t *testing.T, public bool) *server.Server {
+	t.Helper()
+	oldUser, oldRedis := store.UserRepo, internal.Rdb
+	t.Cleanup(func() { store.UserRepo = oldUser; internal.Rdb = oldRedis })
+	store.UserRepo = httpActiveUserRepo{}
+	clients := fixtureClients{"1": &model.AuthClient{ID: 1, Secret: "origin-secret"}, "2": &model.AuthClient{ID: 2, Secret: "caller-secret", Public: public}}
+	if public {
+		clients["2"].(*model.AuthClient).Secret = ""
+	}
+	manager := manage.NewDefaultManager()
+	manager.MapClientStorage(clients)
+	tokens := store.AuditTokenStore()
+	manager.MapTokenStorage(tokens)
+	token := models.NewToken()
+	token.SetClientID("1")
+	token.SetUserID("42")
+	token.SetScope("profile")
+	token.SetAccess("origin-client-token")
+	token.SetAccessCreateAt(time.Now())
+	token.SetAccessExpiresIn(time.Hour)
+	if err := tokens.Create(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	return server.NewServer(server.NewConfig(), manager)
+}
+func TestIntrospectionMustReportTokenClientID(t *testing.T) {
+	srv := introspectionServer(t, false)
+	req := httptest.NewRequest("POST", "/introspect", strings.NewReader(url.Values{"token": {"origin-client-token"}}.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("2", "caller-secret")
+	response := httptest.NewRecorder()
+	getIntrospectHandler(srv)(response, req)
+	var data map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &data); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code == 200 && data["active"] == true && data["client_id"] != "1" {
+		t.Fatalf("client-1 token was relabeled client_id=%v", data["client_id"])
+	}
+}
+func TestPublicClientMustNotIntrospectOtherClients(t *testing.T) {
+	srv := introspectionServer(t, true)
+	req := httptest.NewRequest("POST", "/introspect", strings.NewReader("token=origin-client-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("2", "")
+	response := httptest.NewRecorder()
+	getIntrospectHandler(srv)(response, req)
+	if response.Code == 200 {
+		t.Fatalf("public client id plus empty secret authorizes cross-client introspection: %s", response.Body.String())
+	}
+}
+func TestPublicClientMustNotReadOtherClientUserinfo(t *testing.T) {
+	srv := introspectionServer(t, true)
+	req := httptest.NewRequest("POST", "/userinfo", strings.NewReader("token=origin-client-token"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth("2", "")
+	response := httptest.NewRecorder()
+	getUserinfoHandler(srv)(response, req)
+	if response.Code == 200 {
+		t.Fatal("public client id plus empty secret authorizes another client's userinfo")
+	}
+}
+
+func TestOwnerIntrospectionAndBearerUserinfoRemainUsable(t *testing.T) {
+	srv := introspectionServer(t, false)
+	for _, endpoint := range []string{"/introspect", "/userinfo"} {
+		request := httptest.NewRequest("POST", endpoint, strings.NewReader("token=origin-client-token"))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.SetBasicAuth("1", "origin-secret")
+		response := httptest.NewRecorder()
+		if endpoint == "/introspect" {
+			getIntrospectHandler(srv)(response, request)
+		} else {
+			getUserinfoHandler(srv)(response, request)
+		}
+		if response.Code != 200 {
+			t.Fatalf("owner %s failed: %s", endpoint, response.Body.String())
+		}
+	}
+	request := httptest.NewRequest("GET", "/userinfo", nil)
+	request.Header.Set("Authorization", "Bearer origin-client-token")
+	response := httptest.NewRecorder()
+	getUserinfoHandler(srv)(response, request)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"sub":"42"`) {
+		t.Fatalf("bearer userinfo failed: %s", response.Body.String())
+	}
+}
+
+func TestCSRFTokensAreSessionBoundAndRequiredWithoutOrigin(t *testing.T) {
+	mgr := session.NewManager()
+	request := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	first, err := mgr.Start(context.Background(), httptest.NewRecorder(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mgr.Start(context.Background(), httptest.NewRecorder(), httptest.NewRequest("GET", "https://auth.example.invalid/login", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := csrfToken(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := httptest.NewRequest("POST", "https://auth.example.invalid/login", nil)
+	if validateCSRF(post, first) == nil {
+		t.Fatal("missing CSRF accepted")
+	}
+	post.Header.Set("X-CSRF-Token", token)
+	if err := validateCSRF(post, first); err != nil {
+		t.Fatal(err)
+	}
+	if validateCSRF(post, second) == nil {
+		t.Fatal("CSRF token accepted for another session")
+	}
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest("POST", "https://auth.example.invalid/login", strings.NewReader(`{}`))
+	handleJsonLogin(ctx, first)
+	if w.Code != 403 {
+		t.Fatalf("login without CSRF returned %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	handleJsonReg(w, httptest.NewRequest("POST", "https://auth.example.invalid/registration", strings.NewReader(`{}`)), first)
+	if w.Code != 403 {
+		t.Fatalf("registration without CSRF returned %d", w.Code)
+	}
+}
+
+func TestOriginRequiresExactConfiguredOriginAndAllowsOAuthNavigation(t *testing.T) {
+	old := internal.AuthServerConfig.Issuer
+	defer func() { internal.AuthServerConfig.Issuer = old }()
+	internal.AuthServerConfig.Issuer = "https://auth.example.invalid"
+	for _, scenario := range []struct {
+		origin, fetch, method string
+		status                int
+	}{
+		{"https://auth.example.invalid", "same-origin", "POST", 204},
+		{"http://auth.example.invalid", "same-site", "POST", 403},
+		{"https://evil.example.invalid", "cross-site", "POST", 403},
+		{"null", "", "POST", 403},
+		{"https://auth.example.invalid/path", "", "POST", 403},
+		{"", "cross-site", "POST", 403},
+		{"https://evil.example.invalid", "cross-site", "GET", 204},
+	} {
+		router := gin.New()
+		router.Use(sameOriginMiddleware())
+		router.Any("/login", func(c *gin.Context) { c.Status(204) })
+		request := httptest.NewRequest(scenario.method, "http://internal-proxy/login", nil)
+		request.Header.Set("Origin", scenario.origin)
+		request.Header.Set("Sec-Fetch-Site", scenario.fetch)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != scenario.status {
+			t.Errorf("origin %q / %s returned %d", scenario.origin, scenario.method, response.Code)
+		}
+	}
+}
+
+func TestAuthenticationRateLimitAndForwardedIPSpoofing(t *testing.T) {
+	old := internal.Rdb
+	defer func() { internal.Rdb = old }()
+	client, _ := store.AuditRedisClient()
+	internal.Rdb = client
+	router := gin.New()
+	router.Use(authRateMiddleware())
+	router.POST("/login", func(c *gin.Context) { c.Status(204) })
+	for i := 0; i < 31; i++ {
+		request := httptest.NewRequest("POST", "/login", nil)
+		request.RemoteAddr = "192.0.2.1:1234"
+		request.Header.Set("CF-Connecting-IP", fmt.Sprintf("198.51.100.%d", i))
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		expected := 204
+		if i == 30 {
+			expected = 429
+		}
+		if response.Code != expected {
+			t.Fatalf("attempt %d returned %d", i+1, response.Code)
+		}
+	}
+	if !allowAuthAttempt(context.Background(), "account:one", 1) || allowAuthAttempt(context.Background(), "account:one", 1) || !allowAuthAttempt(context.Background(), "account:two", 1) {
+		t.Fatal("account limiter isolation failed")
+	}
+}
+
+func TestBodyLimitAndSecurityHeaders(t *testing.T) {
+	router := gin.New()
+	router.Use(securityHeadersMiddleware(), bodyLimitMiddleware())
+	router.POST("/registration", func(c *gin.Context) {
+		_, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.Status(413)
+			return
+		}
+		c.Status(204)
+	})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest("POST", "/registration", strings.NewReader(strings.Repeat("x", maxRequestBody+1))))
+	if response.Code != 413 {
+		t.Fatalf("oversized body returned %d", response.Code)
+	}
+	for _, header := range []string{"X-Frame-Options", "Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy", "Permissions-Policy"} {
+		if response.Header().Get(header) == "" {
+			t.Errorf("missing %s", header)
+		}
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("authentication page cacheable")
+	}
+}
+
+func TestLogoutRevokesUserOnServer(t *testing.T) {
+	srv := introspectionServer(t, false)
+	request := httptest.NewRequest("POST", "https://auth.example.invalid/logout", nil)
+	request.Header.Set("Authorization", "Bearer origin-client-token")
+	response := httptest.NewRecorder()
+	getLogoutHandler(srv)(response, request)
+	if response.Code != 204 {
+		t.Fatalf("server logout failed: %s", response.Body.String())
+	}
+	version, err := adminoauth2.UserSessionVersion(context.Background(), "42")
+	if err != nil || version == "0" {
+		t.Fatal("logout did not change user security generation")
+	}
+}
+
+func TestHTTPSIssuerForcesSecureCookieBehindPublicHTTPProxy(t *testing.T) {
+	old := internal.AuthServerConfig.Issuer
+	defer func() { internal.AuthServerConfig.Issuer = old }()
+	internal.AuthServerConfig.Issuer = "https://auth.example.invalid"
+	router := gin.New()
+	router.Use(securityHeadersMiddleware())
+	router.GET("/login", func(c *gin.Context) {
+		http.SetCookie(c.Writer, &http.Cookie{Name: "go_session_id", Value: "fixture", Path: "/"})
+		c.String(200, "ok")
+	})
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest("GET", "http://internal-proxy/login", nil))
+	cookie := response.Result().Cookies()[0]
+	if !cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("unsafe proxy cookie: %s", cookie.String())
+	}
+}
+
+type fixtureTransport func(*http.Request) (*http.Response, error)
+
+func (f fixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type loginUserRepo struct{ store.UserStore }
+
+func (loginUserRepo) GetUserByCredentials(string, *model.ProviderType, json.RawMessage, session.Store) (*model.User, error) {
+	return &model.User{ID: 42, Email: "fixture@example.invalid"}, nil
+}
+func (loginUserRepo) GetUserByID(id int64) (*model.User, error) { return &model.User{ID: id}, nil }
+
+func TestSuccessfulLoginRotatesSIDAndRejectsStaleLoginPage(t *testing.T) {
+	oldUser, oldRedis, oldTransport := store.UserRepo, internal.Rdb, turnstileClient.GetClient().Transport
+	defer func() { store.UserRepo = oldUser; internal.Rdb = oldRedis; turnstileClient.SetTransport(oldTransport) }()
+	store.UserRepo = loginUserRepo{}
+	internal.Rdb, _ = store.AuditRedisClient()
+	turnstileClient.SetTransport(fixtureTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"success":true}`))}, nil
+	}))
+	initial := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	initialResponse := httptest.NewRecorder()
+	s, err := session.Start(context.Background(), initialResponse, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &authorizeRequestState{ClientID: "1", RedirectURI: "https://app.example.invalid/callback"}
+	if err := putAuthorizeRequest(s, state); err != nil {
+		t.Fatal(err)
+	}
+	token, err := csrfToken(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCookie := initialResponse.Result().Cookies()[0]
+	request := httptest.NewRequest("POST", "https://auth.example.invalid/login", strings.NewReader(`{"provider_type":"EmailPassword","login_key":"fixture@example.invalid","data":{"password":"fixture-password"},"cf_token":"fixture","request_id":"`+state.ID+`"}`))
+	request.AddCookie(oldCookie)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", token)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = request
+	handleJsonLogin(c, s)
+	if response.Code != 200 {
+		t.Fatalf("valid login failed: %d %s", response.Code, response.Body.String())
+	}
+	cookies := response.Result().Cookies()
+	if len(cookies) == 0 || cookies[len(cookies)-1].Value == oldCookie.Value {
+		t.Fatal("successful login did not rotate SID")
+	}
+	next := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	next.AddCookie(cookies[len(cookies)-1])
+	logged, err := session.Start(context.Background(), httptest.NewRecorder(), next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentSessionUser(context.Background(), logged) == nil {
+		t.Fatal("new SID did not persist authenticated user")
+	}
+	if findAuthorizeRequest(logged, state.ID) == nil {
+		t.Fatal("rotation lost pending OAuth request")
+	}
+	oldRequest := httptest.NewRequest("GET", "https://auth.example.invalid/login", nil)
+	oldRequest.AddCookie(oldCookie)
+	oldSession, err := session.Start(context.Background(), httptest.NewRecorder(), oldRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentSessionUser(context.Background(), oldSession) != nil {
+		t.Fatal("old SID authenticated after login")
+	}
+	// A stale login page in another tab cannot silently change the signed-in user.
+	newToken, err := csrfToken(logged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := httptest.NewRequest("POST", "https://auth.example.invalid/login", strings.NewReader(`{}`))
+	stale.Header.Set("X-CSRF-Token", newToken)
+	rejected := httptest.NewRecorder()
+	cc, _ := gin.CreateTestContext(rejected)
+	cc.Request = stale
+	handleJsonLogin(cc, logged)
+	if rejected.Code != 409 {
+		t.Fatalf("stale login page returned %d", rejected.Code)
+	}
+}
+
+func TestIntrospectionHidesInactiveAndUnauthorizedTokens(t *testing.T) {
+	srv := introspectionServer(t, false)
+	for _, value := range []string{"unknown-token", "origin-client-token"} {
+		request := httptest.NewRequest("POST", "/introspect", strings.NewReader(url.Values{"token": {value}}.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.SetBasicAuth("2", "caller-secret")
+		response := httptest.NewRecorder()
+		getIntrospectHandler(srv)(response, request)
+		if response.Code != 200 || strings.TrimSpace(response.Body.String()) != `{"active":false}` {
+			t.Fatalf("unexpected inactive response: %d %s", response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestForwardedIPIsAcceptedOnlyThroughConfiguredProxy(t *testing.T) {
+	old := internal.AuthServerConfig.TrustedProxies
+	defer func() { internal.AuthServerConfig.TrustedProxies = old }()
+	internal.AuthServerConfig.TrustedProxies = []string{"127.0.0.1/32"}
+	request := httptest.NewRequest("POST", "/login", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("X-Forwarded-For", "198.51.100.5, 192.0.2.7")
+	if getIp(request) != "192.0.2.7" {
+		t.Fatal("trusted proxy chain did not choose the nearest untrusted peer")
+	}
+	request.RemoteAddr = "192.0.2.99:1234"
+	if getIp(request) != "192.0.2.99" {
+		t.Fatal("untrusted peer spoofed forwarded address")
+	}
+}

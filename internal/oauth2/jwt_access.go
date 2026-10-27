@@ -83,15 +83,18 @@ func ParseAccessToken(raw, expectedAudience string) (*AccessTokenClaims, error) 
 	if raw == "" || strings.Count(raw, ".") != 2 {
 		return nil, errors.New("access token is not a JWT")
 	}
-	key, err := accessVerificationKey()
-	if err != nil {
-		return nil, err
-	}
-
 	claims := &AccessTokenClaims{}
 	parsed, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
 		if token.Method.Alg() != "RS256" {
 			return nil, fmt.Errorf("unexpected JWT signing method: %s", token.Method.Alg())
+		}
+		kid, ok := token.Header["kid"].(string)
+		if !ok || kid == "" {
+			return nil, errors.New("access token kid is missing")
+		}
+		key, err := accessVerificationKeyForKid(kid)
+		if err != nil {
+			return nil, err
 		}
 		return key.PublicKey, nil
 	},
@@ -125,6 +128,14 @@ func accessSigningKey() (*model.RSAKey, error) {
 	return nil, errors.New("no RSA JWT key configured")
 }
 
-func accessVerificationKey() (*model.RSAKey, error) {
-	return accessSigningKey()
+func accessVerificationKeyForKid(kid string) (*model.RSAKey, error) {
+	if kid == "" {
+		return nil, errors.New("empty JWT kid")
+	}
+	for _, key := range JWTKeys {
+		if rsaKey, ok := key.(*model.RSAKey); ok && rsaKey.Kid() == kid {
+			return rsaKey, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown JWT kid: %s", kid)
 }

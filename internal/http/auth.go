@@ -1,11 +1,9 @@
 package http
 
 import (
-	"auth-server/internal"
 	"auth-server/internal/model"
 	"auth-server/internal/render"
 	storeImpl "auth-server/internal/store"
-	"auth-server/internal/util"
 	"log/slog"
 	"net/http"
 
@@ -26,7 +24,8 @@ func getAuthHandler() http.HandlerFunc {
 			writeAuthorizeError(w, "invalid_request", "authorization request not found or expired")
 			return
 		}
-		if _, ok := s.Get(internal.SessionKeyUserID); !ok {
+		sessionUser := currentSessionUser(r.Context(), s)
+		if sessionUser == nil {
 			redirectToLogin(w, r, state.ID)
 			return
 		}
@@ -46,23 +45,6 @@ func getAuthHandler() http.HandlerFunc {
 		scopes := model.ParseScopeNames(state.Scope)
 		if len(scopes) != len(state.Scope) {
 			writeAuthorizeError(w, "invalid_scope", "the requested scopes are no longer available")
-			return
-		}
-
-		uVal, ok := s.Get(internal.SessionKeyUserID)
-		if !ok {
-			redirectToLogin(w, r, state.ID)
-			return
-		}
-		var sessionUser *model.SessionUserInfo
-		if v, ok := uVal.(map[string]any); ok {
-			sessionUser, err = util.MapToStruct[*model.SessionUserInfo](v)
-			if err != nil {
-				http.Error(w, "failed to parse session user info", http.StatusInternalServerError)
-				return
-			}
-		} else {
-			http.Error(w, "invalid session user info type", http.StatusInternalServerError)
 			return
 		}
 
