@@ -3,6 +3,7 @@ package http
 import (
 	"auth-server/internal"
 	"auth-server/internal/model"
+	"auth-server/internal/password"
 	"auth-server/internal/render"
 	storeImpl "auth-server/internal/store"
 	"auth-server/internal/util"
@@ -108,12 +109,21 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		return
 	}
 	if userInfo == nil {
+		// Email/password failures must be indistinguishable from a wrong
+		// password, including timing. Telegram unregistered users still need
+		// the registration continuation flow.
+		if *req.ProviderType == model.ProviderEmailPassword {
+			dummy := model.EmailPasswordProviderData{}
+			_ = json.Unmarshal(req.Data, &dummy)
+			password.DummyVerify(dummy.Password)
+			slog.Warn("failed to verify credentials", "loginKey", req.LoginKey, "provider", req.ProviderType, "err", "invalid_credentials")
+			responseJson(c.Writer, 1, "invalid_credentials")
+			return
+		}
 		slog.Warn("unregistered credential", "loginKey", req.LoginKey, "provider", req.ProviderType)
-		if *req.ProviderType == model.ProviderTelegram {
-			if err := saveTelegramSessionOnUnregistered(req.Data, s); err != nil {
-				responseJson(c.Writer, 1, err.Error())
-				return
-			}
+		if err := saveTelegramSessionOnUnregistered(req.Data, s); err != nil {
+			responseJson(c.Writer, 1, err.Error())
+			return
 		}
 		responseJson(c.Writer, 0, map[string]any{"user": nil})
 		return

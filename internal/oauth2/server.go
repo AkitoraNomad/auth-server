@@ -54,7 +54,8 @@ func InitServer() *server.Server {
 		},
 		ForcePKCE: true,
 	}
-	srv := server.NewServer(&oauth2ServerConfig, manager)
+	boundManager := &clientBoundManager{Manager: manager}
+	srv := server.NewServer(&oauth2ServerConfig, boundManager)
 	srv.SetClientInfoHandler(clientInfoHandler)
 	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
 	srv.SetClientScopeHandler(clientScopeHandler)

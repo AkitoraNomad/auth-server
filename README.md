@@ -158,8 +158,8 @@ go run .
 Phase 1 按约定不自动创建管理员。使用 [db/seed_admin.example.sql](db/seed_admin.example.sql)：
 
 ```bash
-PASSWORD='replace-with-a-long-password'
-HASH=$(printf '%s' "$PASSWORD" | sha256sum | awk '{print $1}')
+read -r -s PASSWORD
+HASH=$(printf '%s' "$PASSWORD" | go run ./cmd/hash-password)
 psql "$DB" \
   -v admin_email='admin@example.com' \
   -v admin_display_name='Admin' \
@@ -167,7 +167,7 @@ psql "$DB" \
   -f db/seed_admin.example.sql
 ```
 
-脚本会创建 `auth_user`、`auth_user_provider`（EmailPassword）和 `auth_admin` 记录。密码目前仍使用无盐 SHA-256，Phase 2 会提供升级路径。
+脚本会创建 `auth_user`、`auth_user_provider`（EmailPassword）和 `auth_admin` 记录。密码使用带随机 salt 的 Argon2id PHC 哈希；`cmd/hash-password` 从标准输入读取密码并输出哈希，不会把密码写入 shell 参数或数据库明文。 由于项目尚未投产，本次不做 SHA-256 兼容；已有 SHA-256 密码记录的账号需要重置密码。
 
 ### 4. 启动 SPA
 
@@ -230,7 +230,7 @@ go build -tags embedspa -o auth-server .
 - [ ] `POST /login` 已登录守卫：session 已有用户时拒绝/复用登录，禁止 stale 登录页切换账号。
 - [ ] Telegram 签名 ID 必须与登录账户绑定，检查 `auth_date` 有效期及异常输入。
 - [ ] 授权确认增加请求绑定、CSRF 防护及拒绝流程，不直接信任 `consented`。
-- [ ] 替换无盐 SHA-256 密码存储，提供现有凭据升级路径。
+- [x] 替换无盐 SHA-256 密码存储：新密码使用 Argon2id（随机 salt、PHC 编码）；由于项目未投产，不做旧哈希兼容。
 - [ ] **测试**：错误 PKCE、授权码重放、过期 Token、回调绕过、刷新凭据错误/跨客户端刷新、Scope 扩大、Telegram 身份错配。
 
 > Phase 1 已对管理客户端和新客户端执行精确 redirect URI 匹配；相似域名/未注册路径会在授权入口拒绝。

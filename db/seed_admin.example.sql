@@ -5,16 +5,16 @@
 -- db/migrations/001_phase1_admin_spa.sql (or rebuilding from db/postgres.sql).
 --
 -- Usage:
---   PASSWORD='change-me-to-something-long'
---   HASH=$(printf '%s' "$PASSWORD" | sha256sum | awk '{print $1}')
+--   read -r -s PASSWORD
+--   HASH=$(printf '%s' "$PASSWORD" | go run ./cmd/hash-password)
 --   psql "$DB" \
 --     -v admin_email='admin@example.com' \
 --     -v admin_display_name='Admin' \
 --     -v admin_password_hash="$HASH" \
 --     -f db/seed_admin.example.sql
 --
--- The email/password login provider stores the unsalted SHA-256 digest expected
--- by the current backend. Password hashing is upgraded in README Phase 2.
+-- The email/password login provider stores an Argon2id PHC hash. The helper
+-- reads the password from stdin so it is not placed in shell arguments.
 
 \set ON_ERROR_STOP on
 

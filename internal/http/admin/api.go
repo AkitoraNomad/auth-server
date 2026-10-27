@@ -4,8 +4,8 @@ import (
 	"auth-server/internal"
 	"auth-server/internal/model"
 	adminoauth2 "auth-server/internal/oauth2"
+	"auth-server/internal/password"
 	"auth-server/internal/store"
-	"auth-server/internal/util"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -181,11 +181,16 @@ func PostUserAPI() gin.HandlerFunc {
 			return
 		}
 		u := &model.User{Email: strings.TrimSpace(req.Email), DisplayName: strings.TrimSpace(req.DisplayName)}
+		providerData, err := hashPassword(req.Password)
+		if err != nil {
+			responseErr(c, http.StatusBadRequest, "invalid password")
+			return
+		}
 		pt := model.ProviderEmailPassword
 		provider := model.AuthUserProvider{
 			LoginKey:     u.Email,
 			ProviderType: &pt,
-			ProviderData: hashPassword(req.Password),
+			ProviderData: providerData,
 		}
 		if err := store.UserRepo.AddUser(u, provider); err != nil {
 			if strings.Contains(err.Error(), "user_exists") {
@@ -410,10 +415,12 @@ func DeleteSessionAPI(_ oauth2.Manager) gin.HandlerFunc {
 	}
 }
 
-func hashPassword(password string) []byte {
-	pd := map[string]string{"password": util.DigestSHA256Hex(password)}
-	data, _ := json.Marshal(pd)
-	return data
+func hashPassword(plain string) ([]byte, error) {
+	hash, err := password.Hash(plain)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]string{"password": hash})
 }
 
 func sameScopeSet(a, b string) bool {
