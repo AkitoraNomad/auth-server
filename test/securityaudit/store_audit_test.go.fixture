@@ -3,6 +3,7 @@ package store
 import (
 	"auth-server/internal"
 	"auth-server/internal/model"
+	"auth-server/internal/password"
 	"auth-server/internal/util"
 	"context"
 	"crypto/hmac"
@@ -16,6 +17,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"io"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,19 +36,25 @@ func signedCredential(authDate int64) json.RawMessage {
 type identityDriver struct{}
 type identityConn struct{}
 
+var identityUserVersion int64
+var identityPasswordData []byte
+
 func (identityDriver) Open(string) (driver.Conn, error)  { return identityConn{}, nil }
 func (identityConn) Prepare(string) (driver.Stmt, error) { return nil, fmt.Errorf("not implemented") }
 func (identityConn) Close() error                        { return nil }
 func (identityConn) Begin() (driver.Tx, error)           { return nil, fmt.Errorf("not implemented") }
 func (identityConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if query == "select * from auth_user_provider where login_key = $1 and provider_type = $2" {
-		if args[0].Value != "222" && args[0].Value != "111" {
+	if strings.Contains(query, "from auth_user_provider p join auth_user") {
+		providerType, data := "Telegram", []byte(`{}`)
+		if args[1].Value == "EmailPassword" {
+			providerType, data = "EmailPassword", identityPasswordData
+		} else if args[0].Value != "222" && args[0].Value != "111" {
 			return nil, fmt.Errorf("unexpected selected identity")
 		}
-		return &identityRows{columns: []string{"id", "user_id", "login_key", "provider_type", "provider_data"}, values: []driver.Value{int64(1), int64(42), "222", "Telegram", []byte(`{}`)}}, nil
+		return &identityRows{columns: []string{"id", "user_id", "login_key", "provider_type", "provider_data", "user_security_version"}, values: []driver.Value{int64(1), int64(42), fmt.Sprint(args[0].Value), providerType, data, int64(0)}}, nil
 	}
 	if query == "select * from auth_user where id = $1" {
-		return &identityRows{columns: []string{"id", "email", "display_name", "last_login_at"}, values: []driver.Value{int64(42), "victim@example.invalid", "Victim", nil}}, nil
+		return &identityRows{columns: []string{"id", "email", "display_name", "last_login_at", "security_version"}, values: []driver.Value{int64(42), "victim@example.invalid", "Victim", nil, identityUserVersion}}, nil
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)
 }
@@ -143,5 +151,30 @@ func TestTelegramMatchingIdentityAndCanonicalReplayRejection(t *testing.T) {
 	}
 	if _, err := (&DbUserStore{}).GetUserByCredentials("111", &provider, replay, sess); err == nil {
 		t.Fatal("same credential reused by changing JSON representation")
+	}
+}
+
+func TestCredentialVerificationRejectsConcurrentSecurityChange(t *testing.T) {
+	sql.Register("audit-identity-version", identityDriver{})
+	db, err := sqlx.Open("audit-identity-version", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	old := internal.DB
+	internal.DB = db
+	defer func() { internal.DB = old; identityUserVersion = 0; identityPasswordData = nil }()
+	hash, err := password.Hash("fixture-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPasswordData, _ = json.Marshal(map[string]string{"password": hash})
+	// Provider credentials were read at version 0; the account changes before
+	// the post-verification read. Never attach the new version to old credentials.
+	identityUserVersion = 1
+	kind := model.ProviderEmailPassword
+	user, err := (&DbUserStore{}).GetUserByCredentials("fixture@example.invalid", &kind, json.RawMessage(`{"password":"fixture-password-123"}`), nil)
+	if err == nil || user != nil {
+		t.Fatal("old credentials authenticated against a new account security version")
 	}
 }

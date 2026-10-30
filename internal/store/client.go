@@ -18,7 +18,7 @@ var ClientRepo oauth2.ClientStore = &DbClientStore{}
 type DbClientStore struct {
 }
 
-func (m *DbClientStore) GetByID(_ context.Context, id string) (oauth2.ClientInfo, error) {
+func (m *DbClientStore) GetByID(ctx context.Context, id string) (oauth2.ClientInfo, error) {
 	clientID, err := strconv.ParseInt(id, 10, 64)
 	if err != nil || clientID <= 0 {
 		// Client ids are BIGINT in this deployment; an unknown/non-numeric id is
@@ -26,7 +26,7 @@ func (m *DbClientStore) GetByID(_ context.Context, id string) (oauth2.ClientInfo
 		return nil, nil
 	}
 	var client model.AuthClient
-	err = internal.DB.Get(&client, "select * from auth_client where id = $1", clientID)
+	err = internal.DB.GetContext(ctx, &client, "select * from auth_client where id = $1", clientID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -34,15 +34,6 @@ func (m *DbClientStore) GetByID(_ context.Context, id string) (oauth2.ClientInfo
 		return nil, err
 	}
 	return &client, nil
-}
-
-// List returns all clients (admin usage).
-func (m *DbClientStore) List(ctx context.Context) ([]model.AuthClient, error) {
-	var clients []model.AuthClient
-	if err := internal.DB.SelectContext(ctx, &clients, "select * from auth_client order by created_at desc"); err != nil {
-		return nil, err
-	}
-	return clients, nil
 }
 
 // Create inserts a new client and lets PostgreSQL allocate the BIGINT id.
@@ -66,8 +57,8 @@ func (m *DbClientStore) Create(ctx context.Context, c *model.AuthClient) error {
 	}
 
 	rows, err := internal.DB.NamedQueryContext(ctx, `insert into auth_client
-		(display_name, secret, domain, scopes, token_type, is_public, redirect_uris, grant_types, created_at, updated_at)
-		values (:display_name, :secret, :domain, :scopes, :token_type, :is_public, :redirect_uris, :grant_types, :created_at, :updated_at)
+		(display_name, secret, domain, scopes, token_type, is_public, is_disabled, redirect_uris, grant_types, created_at, updated_at)
+		values (:display_name, :secret, :domain, :scopes, :token_type, :is_public, :is_disabled, :redirect_uris, :grant_types, :created_at, :updated_at)
 		returning id`, c)
 	if err != nil {
 		return err
@@ -88,6 +79,8 @@ func (m *DbClientStore) Delete(ctx context.Context, id string) error {
 	if err != nil || clientID <= 0 {
 		return errors.New("invalid client id")
 	}
-	_, err = internal.DB.ExecContext(ctx, "delete from auth_client where id = $1", clientID)
-	return err
+	if clientID == internal.AuthServerConfig.Admin.ClientID {
+		return ErrProtectedClient
+	}
+	return requireAffected(internal.DB.ExecContext(ctx, "delete from auth_client where id = $1", clientID))
 }

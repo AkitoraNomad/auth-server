@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-session/session/v3"
@@ -85,8 +86,16 @@ func (m *DbUserStore) GetUserByCredentials(
 		}
 	}
 
-	var providers []model.AuthUserProvider
-	if err := internal.DB.Select(&providers, `select * from auth_user_provider where login_key = $1 and provider_type = $2`, loginKey, providerType); err != nil {
+	var providers []struct {
+		model.AuthUserProvider
+		UserSecurityVersion int64 `db:"user_security_version"`
+	}
+	query := `select p.*,u.security_version as user_security_version from auth_user_provider p join auth_user u on u.id=p.user_id where p.login_key = $1 and p.provider_type = $2`
+	if *providerType == model.ProviderEmailPassword {
+		loginKey = strings.ToLower(strings.TrimSpace(loginKey))
+		query = `select p.*,u.security_version as user_security_version from auth_user_provider p join auth_user u on u.id=p.user_id where lower(p.login_key) = $1 and p.provider_type = $2`
+	}
+	if err := internal.DB.Select(&providers, query, loginKey, providerType); err != nil {
 		return nil, err
 	}
 	if len(providers) == 0 {
@@ -107,7 +116,7 @@ func (m *DbUserStore) GetUserByCredentials(
 			return nil, err
 		}
 		if repo.Validate(req.Password) {
-			return m.GetUserByID(provider.UserID)
+			return m.loginUser(provider.UserID, provider.UserSecurityVersion)
 		}
 		return nil, errors.New("invalid_credentials")
 	case model.ProviderTelegram:
@@ -126,7 +135,7 @@ func (m *DbUserStore) GetUserByCredentials(
 		if err := sessionStore.Save(); err != nil {
 			return nil, err
 		}
-		return m.GetUserByID(provider.UserID)
+		return m.loginUser(provider.UserID, provider.UserSecurityVersion)
 	default:
 		return nil, fmt.Errorf("unknown ProviderType: %v", providerType)
 	}
@@ -202,18 +211,6 @@ func (m *DbUserStore) UpdateLastLogin(userID int64) error {
 	return err
 }
 
-func (m *DbUserStore) List() ([]model.User, error) {
-	var authUsers []model.AuthUser
-	if err := internal.DB.Select(&authUsers, "select * from auth_user order by id desc"); err != nil {
-		return nil, err
-	}
-	users := make([]model.User, 0, len(authUsers))
-	for _, au := range authUsers {
-		users = append(users, model.NewUserFromAuth(au, au.LastLoginAt))
-	}
-	return users, nil
-}
-
 func (m *DbUserStore) Delete(id int64) error {
 	tx, err := internal.DB.Beginx()
 	if err != nil {
@@ -227,8 +224,19 @@ func (m *DbUserStore) Delete(id int64) error {
 	if _, err = tx.Exec("DELETE FROM auth_user_provider WHERE user_id = $1", id); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("DELETE FROM auth_user WHERE id = $1", id); err != nil {
+	if err = requireAffected(tx.Exec("DELETE FROM auth_user WHERE id = $1", id)); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (m *DbUserStore) loginUser(id int64, securityVersion int64) (*model.User, error) {
+	user, err := m.GetUserByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if user.IsDisabled || user.SecurityVersion != securityVersion {
+		return nil, errors.New("invalid_credentials")
+	}
+	return user, nil
 }

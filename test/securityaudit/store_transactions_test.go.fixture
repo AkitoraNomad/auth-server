@@ -70,7 +70,7 @@ func (c *transactionConn) QueryContext(_ context.Context, query string, args []d
 	if strings.HasPrefix(query, "SELECT EXISTS") {
 		return &transactionRows{value: c.admins[args[0].Value.(int64)]}, nil
 	}
-	if query == `SELECT COUNT(*) FROM auth_admin` {
+	if query == `SELECT COUNT(*) FROM auth_admin a JOIN auth_user u ON u.id = a.user_id WHERE NOT u.is_disabled` {
 		return &transactionRows{value: int64(len(c.admins))}, nil
 	}
 	return nil, fmt.Errorf("unexpected query: %s", query)

@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-oauth2/oauth2/v4"
@@ -188,16 +187,7 @@ func GetMeAPI() gin.HandlerFunc {
 
 // ---------- Users ----------
 
-func GetUsersAPI() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		users, err := store.UserRepo.(*store.DbUserStore).List()
-		if err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		responseJSON(c, http.StatusOK, users)
-	}
-}
+func GetUsersAPI() gin.HandlerFunc { return listHandler(store.ListUsers) }
 
 func PostUserAPI() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -206,14 +196,24 @@ func PostUserAPI() gin.HandlerFunc {
 			DisplayName string `json:"display_name"`
 			Password    string `json:"password"`
 		}
-		if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Email) == "" || utf8.RuneCountInString(req.Password) < 12 {
+		if err := c.ShouldBindJSON(&req); err != nil || !validPassword(req.Password) {
 			responseErr(c, http.StatusBadRequest, "email and a password of at least 12 characters are required")
 			return
 		}
-		u := &model.User{Email: strings.TrimSpace(req.Email), DisplayName: strings.TrimSpace(req.DisplayName)}
+		email, ok := validEmail(req.Email)
+		if !ok {
+			responseErr(c, 400, "valid email required")
+			return
+		}
+		name := strings.TrimSpace(req.DisplayName)
+		if len([]rune(name)) > 200 {
+			responseErr(c, 400, "display name is too long")
+			return
+		}
+		u := &model.User{Email: email, DisplayName: name}
 		providerData, err := hashPassword(req.Password)
 		if err != nil {
-			responseErr(c, http.StatusBadRequest, "invalid password")
+			responseErr(c, http.StatusServiceUnavailable, "password service is busy; try again")
 			return
 		}
 		pt := model.ProviderEmailPassword
@@ -223,11 +223,7 @@ func PostUserAPI() gin.HandlerFunc {
 			ProviderData: providerData,
 		}
 		if err := store.UserRepo.AddUser(u, provider); err != nil {
-			if strings.Contains(err.Error(), "user_exists") {
-				responseErr(c, http.StatusConflict, "user already exists")
-				return
-			}
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			storeError(c, err)
 			return
 		}
 		responseJSON(c, http.StatusOK, gin.H{"id": u.ID})
@@ -243,11 +239,7 @@ func DeleteUserAPI() gin.HandlerFunc {
 		}
 
 		if err := store.UserRepo.(*store.DbUserStore).Delete(id); err != nil {
-			if errors.Is(err, store.ErrLastAdmin) {
-				responseErr(c, http.StatusConflict, err.Error())
-				return
-			}
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			storeError(c, err)
 			return
 		}
 		// Also advance the persistent security generation, invalidating existing
@@ -263,90 +255,29 @@ func DeleteUserAPI() gin.HandlerFunc {
 
 // ---------- Clients ----------
 
-func GetClientsAPI() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		clients, err := store.ClientRepo.(*store.DbClientStore).List(c.Request.Context())
-		if err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		// AuthClient.Secret is json:"-" so secrets never appear in this list.
-		responseJSON(c, http.StatusOK, clients)
-	}
-}
+func GetClientsAPI() gin.HandlerFunc { return listHandler(store.ListClients) }
 
 func PostClientAPI() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req struct {
-			DisplayName  string   `json:"display_name"`
-			Domain       string   `json:"domain"`
-			Secret       string   `json:"secret"`
-			Scopes       []string `json:"scopes"`
-			TokenType    int      `json:"token_type"`
-			Public       bool     `json:"is_public"`
-			RedirectURIs []string `json:"redirect_uris"`
-			GrantTypes   []string `json:"grant_types"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			responseErr(c, http.StatusBadRequest, "invalid body")
+		client, req := clientFromRequest(c)
+		if client == nil {
 			return
 		}
-		if strings.TrimSpace(req.DisplayName) == "" {
-			responseErr(c, http.StatusBadRequest, "display_name required")
-			return
-		}
-		if req.TokenType != int(model.OpaqueToken) && req.TokenType != int(model.JWT) {
-			responseErr(c, http.StatusBadRequest, "token_type must be 0 (opaque) or 1 (JWT)")
-			return
-		}
-		redirectURIs, err := normalizeRedirectURIs(req.RedirectURIs, req.Domain)
-		if err != nil {
-			responseErr(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		scopes, err := normalizeScopes(req.Scopes)
-		if err != nil {
-			responseErr(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		grantTypes, err := normalizeGrantTypes(req.GrantTypes, req.Public)
-		if err != nil {
-			responseErr(c, http.StatusBadRequest, err.Error())
-			return
-		}
-		if req.Public && slices.Contains(grantTypes, "client_credentials") {
-			responseErr(c, http.StatusBadRequest, "public clients cannot use client_credentials")
-			return
-		}
-		if req.Public {
-			req.Secret = ""
-		} else if req.Secret == "" {
-			req.Secret = generateRandomSecret(32)
-			if req.Secret == "" {
-				responseErr(c, http.StatusInternalServerError, "failed to generate client secret")
-				return
+		if !client.Public {
+			client.Secret = req.Secret
+			if client.Secret == "" {
+				client.Secret = generateRandomSecret(32)
+				if client.Secret == "" {
+					responseErr(c, 500, "unable to generate secret")
+					return
+				}
 			}
 		}
-		tt := model.TokenType(req.TokenType)
-		client := &model.AuthClient{
-			DisplayName:  strings.TrimSpace(req.DisplayName),
-			Domain:       redirectURIs[0],
-			Secret:       req.Secret,
-			Scopes:       scopes,
-			TokenType:    &tt,
-			Public:       req.Public,
-			RedirectURIs: redirectURIs,
-			GrantTypes:   grantTypes,
-		}
 		if err := store.ClientRepo.(*store.DbClientStore).Create(c.Request.Context(), client); err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			storeError(c, err)
 			return
 		}
-		secret := ""
-		if !client.Public {
-			secret = client.Secret
-		}
-		responseJSON(c, http.StatusOK, gin.H{"id": client.ID, "secret": secret})
+		responseJSON(c, 200, gin.H{"id": client.ID, "secret": client.Secret})
 	}
 }
 
@@ -363,7 +294,7 @@ func DeleteClientAPI() gin.HandlerFunc {
 			return
 		}
 		if err := store.ClientRepo.(*store.DbClientStore).Delete(c.Request.Context(), id); err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			storeError(c, err)
 			return
 		}
 		responseJSON(c, http.StatusOK, nil)
@@ -372,23 +303,7 @@ func DeleteClientAPI() gin.HandlerFunc {
 
 // ---------- Admins ----------
 
-func GetAdminsAPI() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		var rows []struct {
-			ID     int64  `db:"id" json:"id"`
-			UserID int64  `db:"user_id" json:"user_id"`
-			Email  string `db:"email" json:"email"`
-		}
-		query := `SELECT a.id, a.user_id, u.email
-			FROM auth_admin a JOIN auth_user u ON a.user_id = u.id
-			ORDER BY a.created_at DESC`
-		if err := internal.DB.Select(&rows, query); err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		responseJSON(c, http.StatusOK, rows)
-	}
-}
+func GetAdminsAPI() gin.HandlerFunc { return listHandler(store.ListAdmins) }
 
 func PostAdminAPI() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -401,14 +316,14 @@ func PostAdminAPI() gin.HandlerFunc {
 		}
 		result, err := internal.DB.Exec(
 			`INSERT INTO auth_admin (user_id, created_at, updated_at)
-			 VALUES ($1, now(), now())
-			 ON CONFLICT (user_id) DO NOTHING`, req.UserID)
+			 SELECT id,now(),now() FROM auth_user WHERE id=$1 AND NOT is_disabled
+    ON CONFLICT (user_id) DO NOTHING`, req.UserID)
 		if err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
+			storeError(c, err)
 			return
 		}
 		if affected, _ := result.RowsAffected(); affected == 0 {
-			responseErr(c, http.StatusConflict, "user is already an administrator")
+			responseErr(c, http.StatusConflict, "user is disabled, missing, or already an administrator")
 			return
 		}
 		responseJSON(c, http.StatusOK, nil)
@@ -424,11 +339,7 @@ func DeleteAdminAPI() gin.HandlerFunc {
 		}
 		err = store.DeleteAdmin(c.Request.Context(), uid)
 		if err != nil {
-			if errors.Is(err, store.ErrLastAdmin) {
-				responseErr(c, http.StatusConflict, err.Error())
-				return
-			}
-			responseErr(c, http.StatusInternalServerError, "failed to remove administrator")
+			storeError(c, err)
 			return
 		}
 
@@ -440,22 +351,22 @@ func DeleteAdminAPI() gin.HandlerFunc {
 //
 // The list exposes user records; revocation invalidates all existing user
 // grants and SSO sessions through the persistent security generation.
-func GetSessionsAPI(_ oauth2.Manager) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		users, err := store.UserRepo.(*store.DbUserStore).List()
-		if err != nil {
-			responseErr(c, http.StatusInternalServerError, err.Error())
-			return
-		}
-		responseJSON(c, http.StatusOK, users)
-	}
-}
+func GetSessionsAPI(_ oauth2.Manager) gin.HandlerFunc { return listHandler(store.ListUsers) }
 
 func DeleteSessionAPI(_ oauth2.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		uid, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
 		if err != nil || uid <= 0 {
 			responseErr(c, http.StatusBadRequest, "invalid user_id")
+			return
+		}
+		user, err := store.UserRepo.GetUserByID(uid)
+		if err != nil {
+			storeError(c, err)
+			return
+		}
+		if user == nil {
+			responseErr(c, 404, "record not found")
 			return
 		}
 		if err := adminoauth2.RevokeUserSessions(c.Request.Context(), uid); err != nil {

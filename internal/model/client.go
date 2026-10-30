@@ -20,15 +20,17 @@ type ScopedClientInfo interface {
 }
 
 type AuthClient struct {
-	ID           int64      `db:"id" json:"id"`
-	Secret       string     `db:"secret" json:"-"`
-	Domain       string     `db:"domain" json:"domain"`
-	DisplayName  string     `db:"display_name" json:"display_name"`
-	Scopes       TextArray  `db:"scopes" json:"scopes"`
-	TokenType    *TokenType `db:"token_type" json:"token_type"`
-	Public       bool       `db:"is_public" json:"is_public"`
-	RedirectURIs TextArray  `db:"redirect_uris" json:"redirect_uris"`
-	GrantTypes   TextArray  `db:"grant_types" json:"grant_types"`
+	IsDisabled      bool       `db:"is_disabled" json:"is_disabled"`
+	SecurityVersion int64      `db:"security_version" json:"-"`
+	ID              int64      `db:"id" json:"id"`
+	Secret          string     `db:"secret" json:"-"`
+	Domain          string     `db:"domain" json:"domain"`
+	DisplayName     string     `db:"display_name" json:"display_name"`
+	Scopes          TextArray  `db:"scopes" json:"scopes"`
+	TokenType       *TokenType `db:"token_type" json:"token_type"`
+	Public          bool       `db:"is_public" json:"is_public"`
+	RedirectURIs    TextArray  `db:"redirect_uris" json:"redirect_uris"`
+	GrantTypes      TextArray  `db:"grant_types" json:"grant_types"`
 	BaseModel
 }
 
@@ -110,6 +112,9 @@ func ValidRedirectURI(uri string) bool {
 // AllowsGrantType reports whether the client may use a grant type. An empty
 // grant list is treated as backward-compatible "all server grants".
 func (c *AuthClient) AllowsGrantType(grant string) bool {
+	if c.IsDisabled {
+		return false
+	}
 	if len(c.GrantTypes) == 0 {
 		return true
 	}

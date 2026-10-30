@@ -7,6 +7,8 @@ import type {
   CreateClientResult,
   MeResponse,
   User,
+  Page,
+  ListQuery,
 } from '../types'
 
 export class ApiError extends Error {
@@ -22,6 +24,12 @@ export class ApiError extends Error {
 }
 
 type UnauthorizedHandler = () => Promise<string | null>
+
+type ClientResponse = Omit<AuthClient, 'scopes' | 'redirect_uris' | 'grant_types'> & {
+  scopes: string[] | null
+  redirect_uris: string[] | null
+  grant_types: string[] | null
+}
 
 class ApiClient {
   private getToken: () => string | null = () => null
@@ -79,6 +87,10 @@ class ApiClient {
     return payload as T
   }
 
+  private listUrl(path: string, query: ListQuery): string {
+    return `${path}?${new URLSearchParams({ page: String(query.page), page_size: String(query.page_size), q: query.q, status: query.status })}`
+  }
+
   getMe(accessToken?: string): Promise<MeResponse> {
     return this.request<MeResponse>('/api/admin/me', accessToken
       ? { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -86,8 +98,16 @@ class ApiClient {
   }
 
   // Users
-  getUsers(): Promise<User[]> {
-    return this.request<User[]>('/api/admin/users')
+  getUsers(query: ListQuery): Promise<Page<User>> {
+    return this.request<Page<User>>(this.listUrl('/api/admin/users', query))
+  }
+
+  updateUser(id: number, data: Partial<Pick<User, 'email' | 'display_name' | 'is_disabled'>>): Promise<void> {
+    return this.request(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) })
+  }
+
+  resetUserPassword(id: number, password: string): Promise<void> {
+    return this.request(`/api/admin/users/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) })
   }
 
   createUser(email: string, displayName: string, password: string): Promise<void> {
@@ -102,8 +122,29 @@ class ApiClient {
   }
 
   // Clients
-  getClients(): Promise<AuthClient[]> {
-    return this.request<AuthClient[]>('/api/admin/clients')
+  async getClients(query: ListQuery): Promise<Page<AuthClient>> {
+    const page = await this.request<Page<ClientResponse>>(this.listUrl('/api/admin/clients', query))
+    return {
+      ...page,
+      items: page.items.map((client) => ({
+        ...client,
+        scopes: client.scopes ?? [],
+        redirect_uris: client.redirect_uris ?? [],
+        grant_types: client.grant_types ?? [],
+      })),
+    }
+  }
+
+  updateClient(id: number, data: Omit<CreateClientPayload, 'secret'>): Promise<void> {
+    return this.request(`/api/admin/clients/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+  }
+
+  setClientDisabled(id: number, is_disabled: boolean): Promise<void> {
+    return this.request(`/api/admin/clients/${id}/state`, { method: 'PATCH', body: JSON.stringify({ is_disabled }) })
+  }
+
+  resetClientSecret(id: number): Promise<CreateClientResult> {
+    return this.request(`/api/admin/clients/${id}/secret`, { method: 'POST' })
   }
 
   createClient(data: CreateClientPayload): Promise<CreateClientResult> {
@@ -118,8 +159,8 @@ class ApiClient {
   }
 
   // Admins
-  getAdmins(): Promise<AdminEntry[]> {
-    return this.request<AdminEntry[]>('/api/admin/admins')
+  getAdmins(query: ListQuery): Promise<Page<AdminEntry>> {
+    return this.request<Page<AdminEntry>>(this.listUrl('/api/admin/admins', query))
   }
 
   addAdmin(userId: number): Promise<void> {
@@ -134,8 +175,8 @@ class ApiClient {
   }
 
   // Sessions are user records until the Phase 4 token/session index exists.
-  getSessions(): Promise<User[]> {
-    return this.request<User[]>('/api/admin/sessions')
+  getSessions(query: ListQuery): Promise<Page<User>> {
+    return this.request<Page<User>>(this.listUrl('/api/admin/sessions', query))
   }
 
   revokeUserSessions(userId: number): Promise<void> {

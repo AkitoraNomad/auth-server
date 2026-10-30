@@ -73,11 +73,16 @@ func EnsureAdminClient() error {
 		return fmt.Errorf("load admin client: %w", err)
 	default:
 		_, err = tx.NamedExec(`UPDATE auth_client SET
+   security_version = security_version + CASE WHEN
+    secret IS DISTINCT FROM '' OR is_disabled OR NOT is_public OR token_type IS DISTINCT FROM 'JWT'
+    OR scopes IS DISTINCT FROM :scopes OR redirect_uris IS DISTINCT FROM :redirect_uris OR grant_types IS DISTINCT FROM :grant_types
+    THEN 1 ELSE 0 END,
 			display_name = :display_name,
 			secret = '',
 			domain = :domain,
 			scopes = :scopes,
 			token_type = 'JWT',
+			is_disabled = FALSE,
 			is_public = TRUE,
 			redirect_uris = :redirect_uris,
 			grant_types = :grant_types,
@@ -206,14 +211,14 @@ func protectLastAdmin(tx *sqlx.Tx, userID int64) error {
 		return err
 	}
 	var target bool
-	if err := tx.Get(&target, `SELECT EXISTS (SELECT 1 FROM auth_admin WHERE user_id = $1)`, userID); err != nil {
+	if err := tx.Get(&target, `SELECT EXISTS (SELECT 1 FROM auth_admin a JOIN auth_user u ON u.id = a.user_id WHERE a.user_id = $1 AND NOT u.is_disabled)`, userID); err != nil {
 		return err
 	}
 	if !target {
 		return nil
 	}
 	var count int
-	if err := tx.Get(&count, `SELECT COUNT(*) FROM auth_admin`); err != nil {
+	if err := tx.Get(&count, `SELECT COUNT(*) FROM auth_admin a JOIN auth_user u ON u.id = a.user_id WHERE NOT u.is_disabled`); err != nil {
 		return err
 	}
 	if count <= 1 {
@@ -231,7 +236,7 @@ func DeleteAdmin(ctx context.Context, userID int64) error {
 	if err := protectLastAdmin(tx, userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_admin WHERE user_id = $1`, userID); err != nil {
+	if err := requireAffected(tx.ExecContext(ctx, `DELETE FROM auth_admin WHERE user_id = $1`, userID)); err != nil {
 		return err
 	}
 	return tx.Commit()

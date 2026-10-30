@@ -1,12 +1,15 @@
 import { api, errorMessage } from '../../lib/api'
 import { useList } from '../../lib/use-list'
+import { ListControls } from '../../components/ListControls'
+import type { ListQuery } from '../../types'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
 
-const loadItems = () => api.getSessions()
+const loadItems = (query: ListQuery) => api.getSessions(query)
 
 export default function SessionsPage() {
-  const { data: users, loading, error, setError, reload } = useList(loadItems)
+  const list = useList(loadItems)
+  const { data: users, loading, error, setError, reload } = list
 
   return (
     <div className="space-y-5">
@@ -39,6 +42,7 @@ export default function SessionsPage() {
         </div>
       </div>
 
+      <ListControls {...list} />
       {error && <ErrorAlert message={error} onRetry={reload} />}
 
       <section className="card overflow-hidden border border-base-300 bg-base-100 shadow-sm">
@@ -47,7 +51,7 @@ export default function SessionsPage() {
             <h2 className="font-semibold">User records</h2>
             <p className="text-sm text-base-content/50">Choose a user whose existing access should be revoked.</p>
           </div>
-          <span className="badge badge-ghost badge-sm">{users.length} total</span>
+          <span className="badge badge-ghost badge-sm">{list.total} total</span>
         </div>
 
         {loading ? (
@@ -79,6 +83,7 @@ export default function SessionsPage() {
                     </td>
                     <td className="font-medium">
                       {user.email}
+                      {user.is_disabled && <span className="badge badge-warning badge-xs ml-2">Disabled</span>}
                       <span className="mt-0.5 block text-xs font-normal text-base-content/50 md:hidden">
                         {user.display_name || '—'}
                       </span>

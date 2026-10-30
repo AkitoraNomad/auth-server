@@ -1,9 +1,29 @@
 package model
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
+
+func TestTextArrayJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input TextArray
+		want  string
+	}{
+		{"nil", nil, `[]`},
+		{"empty", TextArray{}, `[]`},
+		{"populated", TextArray{"profile", "中文", `a"b`}, `["profile","中文","a\"b"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := json.Marshal(tc.input)
+			if err != nil || string(got) != tc.want {
+				t.Fatalf("JSON = %s, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestTextArrayRoundTrip(t *testing.T) {
 	for _, input := range []TextArray{

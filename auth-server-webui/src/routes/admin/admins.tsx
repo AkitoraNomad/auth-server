@@ -3,13 +3,16 @@ import { Link } from 'react-router'
 import type { AdminEntry } from '../../types'
 import { api, errorMessage } from '../../lib/api'
 import { useList } from '../../lib/use-list'
+import { ListControls } from '../../components/ListControls'
+import type { ListQuery } from '../../types'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
 
-const loadItems = () => api.getAdmins()
+const loadItems = (query: ListQuery) => api.getAdmins(query)
 
 export default function AdminsPage() {
-  const { data: admins, loading, error, setError, reload } = useList(loadItems)
+  const list = useList(loadItems)
+  const { data: admins, loading, error, setError, reload } = list
   const [userId, setUserId] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
@@ -59,6 +62,7 @@ export default function AdminsPage() {
         }
       />
 
+      <ListControls {...list} />
       {error && <ErrorAlert message={error} onRetry={reload} />}
 
       <section className="card border border-base-300 bg-base-100 shadow-sm">
@@ -96,7 +100,7 @@ export default function AdminsPage() {
             <h2 className="font-semibold">Administrator accounts</h2>
             <p className="text-sm text-base-content/50">Users with access to this management console.</p>
           </div>
-          <span className="badge badge-ghost badge-sm">{admins.length} total</span>
+          <span className="badge badge-ghost badge-sm">{list.total} total</span>
         </div>
 
         {loading ? (
@@ -130,6 +134,7 @@ export default function AdminsPage() {
                     </td>
                     <td className="font-medium">
                       {admin.email}
+                      {admin.is_disabled && <span className="badge badge-warning badge-xs ml-2">Disabled</span>}
                       <span className="mt-0.5 block text-xs font-normal text-base-content/50 sm:hidden">
                         User ID {admin.user_id}
                       </span>

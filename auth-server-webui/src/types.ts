@@ -1,4 +1,5 @@
 export interface User {
+  is_disabled: boolean
   id: number
   email: string
   display_name: string
@@ -6,6 +7,7 @@ export interface User {
 }
 
 export interface AuthClient {
+  is_disabled: boolean
   id: number
   display_name: string
   domain: string
@@ -19,6 +21,7 @@ export interface AuthClient {
 }
 
 export interface AdminEntry {
+  is_disabled: boolean
   id: number
   user_id: number
   email: string
@@ -58,4 +61,17 @@ export interface ApiResponse<T> {
   code: number
   data: T
   msg?: string
+}
+
+export interface ListQuery {
+  page: number
+  page_size: number
+  q: string
+  status: 'all' | 'active' | 'disabled'
+}
+export interface Page<T> {
+  items: T[]
+  total: number
+  page: number
+  page_size: number
 }

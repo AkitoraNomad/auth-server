@@ -251,17 +251,34 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 		if err := store.EnsureAdminClient(); err != nil {
 			t.Fatal(err)
 		}
-		for _, path := range []string{"db/migrations/001_phase1_admin_spa.sql", "db/migrations/002_identity_constraints.sql"} {
-			migration, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := internal.DB.Exec(string(migration)); err != nil {
-				t.Fatalf("migration %s: %v", path, err)
+	})
+	token := f.token(t, "manage:system manage:clients")
+	t.Run("NullClientCollections", func(t *testing.T) {
+		// Retain this nullable policy fixture for the browser regression too.
+		if _, err := internal.DB.Exec(`INSERT INTO auth_client(display_name,secret,domain,scopes,token_type,redirect_uris,grant_types) VALUES('Nullable policy client','fixture-secret','https://nullable.example.invalid/callback',NULL,'JWT','{}','{}')`); err != nil {
+			t.Fatal(err)
+		}
+		w := f.request("GET", "/api/admin/clients?q=Nullable", token.GetAccess(), nil)
+		if w.Code != 200 {
+			t.Fatalf("clients: %d %s", w.Code, w.Body.String())
+		}
+		var result struct {
+			Data struct {
+				Items []map[string]json.RawMessage `json:"items"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Data.Items) != 1 {
+			t.Fatalf("expected nullable client: %s", w.Body.String())
+		}
+		for _, field := range []string{"scopes", "redirect_uris", "grant_types"} {
+			if string(result.Data.Items[0][field]) != "[]" {
+				t.Fatalf("%s must be an empty JSON array: %s", field, w.Body.String())
 			}
 		}
 	})
-	token := f.token(t, "manage:system manage:clients")
 	t.Run("AdminScopeAndRecentAuthentication", func(t *testing.T) {
 		if w := f.request("GET", "/api/admin/me", token.GetAccess(), nil); w.Code != 200 {
 			t.Fatalf("me: %d %s", w.Code, w.Body.String())
@@ -353,6 +370,7 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 			t.Fatal("logout retained refresh")
 		}
 	})
+	t.Run("Phase3Management", func(t *testing.T) { runPhase3Regression(t, f) })
 	t.Run("Browser", func(t *testing.T) { runBrowserRegression(t, f) })
 	t.Run("ConcurrentLastAdministratorProtection", func(t *testing.T) {
 		var other int64

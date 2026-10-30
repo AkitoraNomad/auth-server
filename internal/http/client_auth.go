@@ -1,6 +1,7 @@
 package http
 
 import (
+	"auth-server/internal/model"
 	"context"
 	"crypto/subtle"
 	"errors"
@@ -19,6 +20,9 @@ func authenticateConfidentialClient(ctx context.Context, manager oauth2.Manager,
 	}
 	cli, err := manager.GetClient(ctx, clientID)
 	if err != nil || cli == nil || cli.IsPublic() || cli.GetSecret() == "" {
+		return nil, errInvalidClientAuth
+	}
+	if client, ok := cli.(*model.AuthClient); ok && client.IsDisabled {
 		return nil, errInvalidClientAuth
 	}
 	if subtle.ConstantTimeCompare([]byte(cli.GetSecret()), []byte(secret)) != 1 {

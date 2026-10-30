@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 from playwright.sync_api import sync_playwright, expect
+from management import run_management_checks
 
 origin = os.environ['AUTH_TEST_ORIGIN']
 checks = []
@@ -65,14 +66,16 @@ with sync_playwright() as p:
             route.fulfill(status=401, content_type='application/json', body='{"code":1,"msg":"expired"}')
         else:
             route.continue_()
-    page.route(origin + '/api/admin/users', expire_first_request)
+    page.route(origin + '/api/admin/users?**', expire_first_request)
     page.locator('nav a[href="/admin-page/users"]').click()
     expect(page.get_by_role('cell', name=os.environ['AUTH_TEST_EMAIL'], exact=True)).to_be_visible()
     assert len(user_requests) == 2 and user_requests[0] != user_requests[1]
     passed('401 refresh rotates the token and retries API with current auth state')
-    page.unroute(origin + '/api/admin/users')
+    page.unroute(origin + '/api/admin/users?**')
     page.locator('nav a[href="/admin-page/clients"]').click()
     expect(page.get_by_role('heading', name='OAuth2 clients', exact=True)).to_be_visible()
+
+    run_management_checks(page, origin, user_requests[-1], passed)
 
     pending = []
     page.route(origin + '/logout', lambda route: pending.append(route))

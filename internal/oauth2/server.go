@@ -147,6 +147,7 @@ func userAuthorizeHandler(w http.ResponseWriter, r *http.Request) (userID string
 	}
 	*r = *r.WithContext(context.WithValue(r.Context(), authenticatedVersionKey{}, sessionUser.AuthVersion))
 	*r = *r.WithContext(context.WithValue(r.Context(), authenticatedTimeKey{}, sessionUser.LoginAt))
+	*r = *r.WithContext(context.WithValue(r.Context(), authenticatedSecurityVersionKey{}, sessionUser.UserSecurityVersion))
 	return
 }
 

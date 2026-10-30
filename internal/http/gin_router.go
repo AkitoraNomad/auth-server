@@ -86,10 +86,15 @@ func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 
 		apiAdmin.GET("/users", admin.RequireScope(model.ScopeManageSystem), admin.GetUsersAPI())
 		apiAdmin.POST("/users", admin.RequireScope(model.ScopeManageSystem), admin.PostUserAPI())
+		apiAdmin.PATCH("/users/:id", admin.RequireScope(model.ScopeManageSystem), admin.PatchUserAPI())
+		apiAdmin.POST("/users/:id/password", admin.RequireScope(model.ScopeManageSystem), admin.ResetUserPasswordAPI())
 		apiAdmin.DELETE("/users/:id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteUserAPI())
 
 		apiAdmin.GET("/clients", admin.RequireScope(model.ScopeManageClients), admin.GetClientsAPI())
 		apiAdmin.POST("/clients", admin.RequireScope(model.ScopeManageClients), admin.PostClientAPI())
+		apiAdmin.PUT("/clients/:id", admin.RequireScope(model.ScopeManageClients), admin.PutClientAPI())
+		apiAdmin.PATCH("/clients/:id/state", admin.RequireScope(model.ScopeManageClients), admin.PatchClientStateAPI())
+		apiAdmin.POST("/clients/:id/secret", admin.RequireScope(model.ScopeManageClients), admin.ResetClientSecretAPI())
 		apiAdmin.DELETE("/clients/:id", admin.RequireScope(model.ScopeManageClients), admin.DeleteClientAPI())
 
 		apiAdmin.GET("/admins", admin.RequireScope(model.ScopeManageSystem), admin.GetAdminsAPI())

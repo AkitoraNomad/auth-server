@@ -32,16 +32,19 @@ const (
 )
 
 type grantPolicy struct {
-	AuthTime    int64  `json:"auth_time"`
-	UserID      string `json:"user"`
-	ClientID    string `json:"client"`
-	Version     string `json:"version"`
-	Scope       string `json:"scope"`
-	RedirectURI string `json:"redirect"`
+	UserSecurityVersion   int64  `json:"user_security_version"`
+	ClientSecurityVersion int64  `json:"client_security_version"`
+	AuthTime              int64  `json:"auth_time"`
+	UserID                string `json:"user"`
+	ClientID              string `json:"client"`
+	Version               string `json:"version"`
+	Scope                 string `json:"scope"`
+	RedirectURI           string `json:"redirect"`
 }
 
 type authenticatedVersionKey struct{}
 type authenticatedTimeKey struct{}
+type authenticatedSecurityVersionKey struct{}
 
 type clientBoundManager struct {
 	oauth2.Manager
@@ -53,8 +56,23 @@ func newClientBoundManager(manager oauth2.Manager, rdb *redis.Client) *clientBou
 }
 
 func (m *clientBoundManager) GenerateAuthToken(ctx context.Context, rt oauth2.ResponseType, req *oauth2.TokenGenerateRequest) (oauth2.TokenInfo, error) {
-	if req == nil || rt != oauth2.Code || req.UserID == "" || !UserIsActive(ctx, req.UserID) {
+	if req == nil || rt != oauth2.Code || req.UserID == "" {
 		return nil, oauth2errors.ErrInvalidGrant
+	}
+	user := activeUser(req.UserID)
+	if user == nil {
+		return nil, oauth2errors.ErrInvalidGrant
+	}
+	cli, err := m.GetClient(ctx, req.ClientID)
+	if err != nil || cli == nil {
+		return nil, oauth2errors.ErrInvalidClient
+	}
+	clientVersion := int64(0)
+	if c, ok := cli.(*model.AuthClient); ok {
+		if c.IsDisabled {
+			return nil, oauth2errors.ErrInvalidClient
+		}
+		clientVersion = c.SecurityVersion
 	}
 	version, err := UserSessionVersion(ctx, req.UserID)
 	if err != nil {
@@ -66,6 +84,10 @@ func (m *clientBoundManager) GenerateAuthToken(ctx context.Context, rt oauth2.Re
 		if !ok || authenticatedVersion != version {
 			return nil, oauth2errors.ErrInvalidGrant
 		}
+		securityVersion, ok := req.Request.Context().Value(authenticatedSecurityVersionKey{}).(int64)
+		if !ok || securityVersion != user.SecurityVersion {
+			return nil, oauth2errors.ErrInvalidGrant
+		}
 		authTime, ok = req.Request.Context().Value(authenticatedTimeKey{}).(time.Time)
 		if !ok || authTime.IsZero() {
 			return nil, oauth2errors.ErrInvalidGrant
@@ -75,7 +97,7 @@ func (m *clientBoundManager) GenerateAuthToken(ctx context.Context, rt oauth2.Re
 	if err != nil {
 		return nil, err
 	}
-	policy := grantPolicy{AuthTime: authTime.Unix(), UserID: ti.GetUserID(), ClientID: ti.GetClientID(), Version: version, Scope: ti.GetScope(), RedirectURI: ti.GetRedirectURI()}
+	policy := grantPolicy{UserSecurityVersion: user.SecurityVersion, ClientSecurityVersion: clientVersion, AuthTime: authTime.Unix(), UserID: ti.GetUserID(), ClientID: ti.GetClientID(), Version: version, Scope: ti.GetScope(), RedirectURI: ti.GetRedirectURI()}
 	data, err := json.Marshal(policy)
 	if err != nil {
 		return nil, err
@@ -95,6 +117,9 @@ func (m *clientBoundManager) GenerateAccessToken(ctx context.Context, gt oauth2.
 		return nil, err
 	}
 	policy := grantPolicy{ClientID: req.ClientID, Scope: req.Scope, Version: "0"}
+	if c, ok := cli.(*model.AuthClient); ok {
+		policy.ClientSecurityVersion = c.SecurityVersion
+	}
 	switch gt {
 	case oauth2.AuthorizationCode:
 		if !validCodeVerifier(req.CodeVerifier) {
@@ -220,6 +245,9 @@ func (m *clientBoundManager) authenticateClient(ctx context.Context, req *oauth2
 	if err != nil || cli == nil {
 		return nil, oauth2errors.ErrInvalidClient
 	}
+	if c, ok := cli.(*model.AuthClient); ok && c.IsDisabled {
+		return nil, oauth2errors.ErrInvalidClient
+	}
 	if cli.IsPublic() {
 		if req.ClientSecret != "" {
 			return nil, oauth2errors.ErrInvalidClient
@@ -302,10 +330,18 @@ func (m *clientBoundManager) familyPolicy(ctx context.Context, family string) (g
 }
 
 func (m *clientBoundManager) policyActive(ctx context.Context, policy grantPolicy) bool {
+	cli, err := m.GetClient(ctx, policy.ClientID)
+	if err != nil || cli == nil {
+		return false
+	}
+	if client, ok := cli.(*model.AuthClient); ok && (client.IsDisabled || client.SecurityVersion != policy.ClientSecurityVersion) {
+		return false
+	}
 	if policy.UserID == "" {
 		return true
 	}
-	if !UserIsActive(ctx, policy.UserID) {
+	user := activeUser(policy.UserID)
+	if user == nil || user.SecurityVersion != policy.UserSecurityVersion {
 		return false
 	}
 	version, err := UserSessionVersion(ctx, policy.UserID)
@@ -410,16 +446,20 @@ func UserSessionVersion(ctx context.Context, userID string) (string, error) {
 	return version, err
 }
 
-func UserIsActive(ctx context.Context, userID string) bool {
-	if userID == "" {
-		return true
-	}
+func activeUser(userID string) *model.User {
 	id, err := strconv.ParseInt(userID, 10, 64)
 	if err != nil || id <= 0 {
-		return false
+		return nil
 	}
 	user, err := storeImpl.UserRepo.GetUserByID(id)
-	return err == nil && user != nil
+	if err != nil || user == nil || user.IsDisabled {
+		return nil
+	}
+	return user
+}
+
+func UserIsActive(_ context.Context, userID string) bool {
+	return userID == "" || activeUser(userID) != nil
 }
 
 // SessionIsActive rejects legacy sessions without a generation, stale sessions
@@ -431,7 +471,8 @@ func SessionIsActive(ctx context.Context, info *model.SessionUserInfo) bool {
 	}
 	uid := strconv.FormatInt(info.User.ID, 10)
 	version, err := UserSessionVersion(ctx, uid)
-	return err == nil && version == info.AuthVersion && UserIsActive(ctx, uid)
+	user := activeUser(uid)
+	return err == nil && version == info.AuthVersion && user != nil && user.SecurityVersion == info.UserSecurityVersion
 }
 
 // RevokeUserSessions invalidates existing sessions, codes and token families.

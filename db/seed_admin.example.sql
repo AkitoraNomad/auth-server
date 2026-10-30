@@ -1,8 +1,7 @@
 -- Phase 1: create the first administrator manually.
 --
 -- The server intentionally does not auto-create an administrator. Run this
--- script once against an initialized database, after applying
--- db/migrations/001_phase1_admin_spa.sql (or rebuilding from db/postgres.sql).
+-- script once against a database initialized with db/postgres.sql.
 --
 -- Usage:
 --   read -r -s PASSWORD

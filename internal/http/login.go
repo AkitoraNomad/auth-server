@@ -133,6 +133,10 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 1, "invalid_credentials")
 		return
 	}
+	if userInfo != nil && userInfo.IsDisabled {
+		responseJson(c.Writer, 1, "invalid_credentials")
+		return
+	}
 	if userInfo == nil {
 		// Email/password failures must be indistinguishable from a wrong
 		// password, including timing. Telegram unregistered users still need
