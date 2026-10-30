@@ -10,12 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
@@ -107,6 +106,9 @@ func RequireAdmin(mgr oauth2.Manager) gin.HandlerFunc {
 			return
 		}
 
+		if authenticated, ok := ti.(interface{ AuthenticationTime() time.Time }); ok {
+			c.Set("admin_auth_time", authenticated.AuthenticationTime())
+		}
 		c.Set("admin_user_id", userID)
 		c.Set("admin_scope", ti.GetScope())
 		c.Set("admin_client_id", expectedClientID)
@@ -140,11 +142,18 @@ func RequireRecentAuthentication(mgr oauth2.Manager) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		checker, ok := mgr.(interface {
+		// Reuse the request snapshot; other Manager implementations keep the
+		// existing fail-closed interface check.
+		recent := false
+		if value, exists := c.Get("admin_auth_time"); exists {
+			authTime, ok := value.(time.Time)
+			recent = ok && adminoauth2.IsRecentAuthentication(authTime)
+		} else if checker, ok := mgr.(interface {
 			RecentlyAuthenticated(context.Context, string) bool
-		})
-		token := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if !ok || !checker.RecentlyAuthenticated(c.Request.Context(), token) {
+		}); ok {
+			recent = checker.RecentlyAuthenticated(c.Request.Context(), strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+		}
+		if !recent {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 1, "msg": "Recent sign-in required. Sign out and sign in again before changing security settings."})
 			return
 		}
@@ -457,11 +466,6 @@ func DeleteSessionAPI(_ oauth2.Manager) gin.HandlerFunc {
 	}
 }
 
-func isLoopbackHost(host string) bool {
-	ip := net.ParseIP(host)
-	return host == "localhost" || (ip != nil && ip.IsLoopback())
-}
-
 func hashPassword(plain string) ([]byte, error) {
 	hash, err := password.Hash(plain)
 	if err != nil {
@@ -495,16 +499,6 @@ func normalizeRedirectURIs(input []string, legacyDomain string) (model.TextArray
 		uri := strings.TrimSpace(raw)
 		if !model.ValidRedirectURI(uri) {
 			return nil, errors.New("invalid or insecure redirect_uri: " + raw)
-		}
-		parsed, err := url.Parse(uri)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Fragment != "" {
-			return nil, errors.New("redirect_uri must be an absolute URL without a fragment: " + raw)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" {
-			return nil, errors.New("redirect_uri must use http or https: " + raw)
-		}
-		if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-			return nil, errors.New("plain HTTP redirect_uri is only allowed for loopback hosts: " + raw)
 		}
 		if _, ok := seen[uri]; ok {
 			continue

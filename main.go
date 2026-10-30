@@ -4,6 +4,7 @@ import (
 	"auth-server/internal"
 	oauth2Http "auth-server/internal/http"
 	"auth-server/internal/oauth2"
+	"auth-server/internal/render"
 	"auth-server/internal/store"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,12 @@ import (
 )
 
 func main() {
+	if err := initialize(); err != nil {
+		slog.Error("failed to initialize server", "err", err)
+		os.Exit(1)
+	}
+	defer internal.DB.Close()
+	defer internal.Rdb.Close()
 	if err := store.EnsureAdminClient(); err != nil {
 		slog.Error("failed to initialize admin client", "err", err)
 		os.Exit(1)
@@ -35,4 +42,23 @@ func main() {
 	if err := httpSrv.ListenAndServe(); err != nil {
 		slog.Error("server exit", "err", err)
 	}
+}
+
+func initialize() error {
+	cfg, err := internal.LoadConfig("config.yaml")
+	if err != nil {
+		return err
+	}
+	internal.AuthServerConfig = cfg
+	if err := oauth2.LoadJWTConfig(); err != nil {
+		return err
+	}
+	if err := render.LoadTemplates("template/*"); err != nil {
+		return err
+	}
+	if err := internal.OpenDatabase(); err != nil {
+		return err
+	}
+	internal.InitRedis()
+	return nil
 }

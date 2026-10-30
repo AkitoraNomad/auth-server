@@ -1,44 +1,12 @@
-import { useEffect, useState } from 'react'
 import { api, errorMessage } from '../../lib/api'
-import type { User } from '../../types'
+import { useList } from '../../lib/use-list'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
 
+const loadItems = () => api.getSessions()
+
 export default function SessionsPage() {
-  const [users, setUsers] = useState<User[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-
-  useEffect(() => {
-    let active = true
-    api
-      .getSessions()
-      .then((data) => {
-        if (active) {
-          setUsers(data)
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          setError(errorMessage(err))
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false)
-        }
-      })
-    return () => {
-      active = false
-    }
-  }, [reloadKey])
-
-  const reload = () => {
-    setLoading(true)
-    setError(null)
-    setReloadKey((key) => key + 1)
-  }
+  const { data: users, loading, error, setError, reload } = useList(loadItems)
 
   return (
     <div className="space-y-5">

@@ -10,7 +10,7 @@ import (
 
 var Rdb *redis.Client
 
-func init() {
+func InitRedis() {
 	options := &redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", AuthServerConfig.Redis.Host, AuthServerConfig.Redis.Port),
 		Username: AuthServerConfig.Redis.Username,

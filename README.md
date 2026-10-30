@@ -1,17 +1,23 @@
 # Auth Server
 
-Go OAuth2 授权服务器，使用 PostgreSQL、Redis，管理前端位于 [auth-server-webui/](auth-server-webui/)。
+Go OAuth2 授权服务器，使用 Gin、PostgreSQL 和 Redis；管理前端位于 [auth-server-webui/](auth-server-webui/)，采用 React、TypeScript、Vite、Tailwind CSS 和 daisyUI。
 
-## 安全修复与升级（2026-10-27）
+## 项目现状（2026-10-30 核对）
 
-严格复审的修复、回归结果和未验证边界见 [修复复测报告](docs/security-remediation-2026-10-27.md)。本次升级会拒绝没有安全元数据的旧授权码、Access/Refresh Token 和 SSO Session，需要重新登录。
+以下区分代码已实现的能力与尚待完成的功能；测试范围见文末。
 
-- 现有数据库需应用 [002_identity_constraints.sql](db/migrations/002_identity_constraints.sql)；先处理重复邮箱、重复外部身份，迁移遇到重复记录会回滚。不要对已有数据运行会删表的 `db/postgres.sql`。
-- 退出管理端会撤销该用户所有现有授权和 SSO 会话。管理员写操作要求最近 15 分钟内通过凭据登录；普通刷新不会延长这个窗口。
-- 生产只允许 HTTPS 回调；本机 HTTP 例外限 loopback。Introspection 仅允许机密客户端查询自身令牌；UserInfo 支持带 `profile` scope 的 Bearer Token。
-- `issuer` 必须是浏览器使用的公网 origin。Vite 代理开发时设置 `OAUTH_ISSUER=http://localhost:5173`；Go 独立托管本机页面时用 `http://localhost:8080`。
-- 反代部署通过 `trusted-proxies` 明确列出实际代理 IP/CIDR，登录限速才会使用这些代理提供的 `X-Forwarded-For`。默认忽略转发头，不能配置任意来源为可信代理。
-- Docker 运行用户为 UID/GID `10001:10001`；挂载配置、密钥应对该用户可读。Redis 可配置 `username`、`password` 和 `tls: true`，需保留令牌和撤销元数据。
+| 模块 | 当前实现与边界 |
+|---|---|
+| OAuth2 | 支持授权码 + S256 PKCE、刷新、机密客户端凭据；所有授权码流程强制 PKCE，已关闭 implicit，不支持密码 grant |
+| 登录与注册 | 支持邮箱密码和 Telegram 登录，自助注册仅支持 Telegram；邮箱密码账号由管理员或 SQL seed 创建；登录/注册需要 Turnstile，Telegram 需额外配置 bot |
+| 管理客户端 | 启动时幂等创建/更新固定 BIGINT ID 的公共客户端，默认 ID=2、JWT Token、无 secret；不自动创建管理员 |
+| 管理权限 | 每次请求校验 JWT、Redis 撤销状态、管理客户端、真实用户、`auth_admin` 和路由 Scope；管理员写操作要求最近 15 分钟内通过凭据登录 |
+| 管理页面 | 用户、客户端、管理员支持列表/新建/删除；客户端创建支持多个回调、Scope、grant_types，secret 仅创建时返回；编辑、启停、密码/secret 重置未实现 |
+| 会话与退出 | 已实现服务端全局退出、用户级强制下线、刷新轮换及重放撤销；会话页列出的是用户记录，尚无真实活跃会话索引或单会话管理 |
+| 元数据与令牌查询 | 已提供 Discovery、JWKS、Introspection、Bearer UserInfo；UserInfo 需要 `profile`，当前仅返回 `sub` |
+| OIDC | 尚未实现 `openid`/`email` Scope、ID Token 和 nonce；提供 Discovery 不代表已完成 OIDC |
+| 部署 | 支持 Vite 开发代理、Go 嵌入管理 SPA、Docker 多阶段构建；尚未提供跨域 CORS 配置或自动迁移执行器 |
+| 数据库 | 当前运行代码仅使用 PostgreSQL；[db/mysql.sql](db/mysql.sql) 是遗留脚本，不代表当前支持 MySQL |
 
 ## 授权流程
 
@@ -36,27 +42,31 @@ sequenceDiagram
     C-->>B: 服务响应
 ```
 
-管理 SPA 使用无 secret 的公共客户端 + S256 PKCE。管理客户端固定为 BIGINT `client_id=2`（默认值，可用 `ADMIN_CLIENT_ID` 修改），由服务端启动时幂等接管。OIDC 的 ID Token/nonce 尚待 Phase 5 实现。
+回调 URL 必须与注册值精确匹配；生产使用 HTTPS，本机 HTTP 仅允许 loopback。公共客户端不能使用 `client_credentials`；机密客户端在兑换及刷新时均需认证。
 
-## 配置示例
+## 本地运行
 
-以下仅展示核心字段；完整字段见 [config-schema.json](config-schema.json)。启动还需要 Turnstile，Telegram 登录需对应 bot 配置。
+### 1. 环境与配置
+
+需要 Go 1.26.0 或更高版本、PostgreSQL、Redis，以及可用的 Turnstile 配置。前端需要 Node.js 22.12+（Docker/CI 使用 Node 22）和 pnpm 11.3.0；数据库初始化示例使用 `psql`。
+
+服务只从**当前工作目录**读取 `config.yaml`，该文件被 Git 忽略，不随仓库分发。先在项目根目录新建配置；下面示例用于本地 Vite 代理开发：
 
 ```yaml
 host: 127.0.0.1
 port: 8080
-issuer: http://localhost:8080
+issuer: http://localhost:5173
+trusted-proxies: []
+db: ${DB:postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable&search_path=auth}
 redis:
-  host: 127.0.0.1
-  port: "6379"
-db: "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable&search_path=auth"
-jwt:
-  - kid: "rsa1"
-    alg: "RS256"
-    sec: |
-      -----BEGIN RSA PRIVATE KEY-----
-      ...
-      -----END RSA PRIVATE KEY-----
+  host: ${REDIS_HOST:127.0.0.1}
+  port: "${REDIS_PORT:6379}"
+cloudflare:
+  turnstile:
+    key: ${TURNSTILE_SITE_KEY}
+    secret: ${TURNSTILE_SECRET_KEY}
+# 仅本地开发：空列表会在每次启动时生成临时 RSA 密钥。
+jwt: []
 admin:
   client-id: 2
   redirect-uris:
@@ -64,219 +74,215 @@ admin:
     - "http://127.0.0.1:5173/admin-page/callback"
     - "http://localhost:8080/admin-page/callback"
     - "http://127.0.0.1:8080/admin-page/callback"
-  scopes:
-    - "manage:system"
-    - "manage:clients"
-  grant-types:
-    - "authorization_code"
-    - "refresh_token"
+  scopes: ["manage:system", "manage:clients"]
+  grant-types: ["authorization_code", "refresh_token"]
 ```
 
-对应的运行时覆盖变量见根目录 [.env.example](.env.example)（可直接 export，或放在 VS Code `launch.json` 的 `envFile` 中）：
+将 `TURNSTILE_SITE_KEY`、`TURNSTILE_SECRET_KEY` 设为所用站点的有效配置。本地临时 JWT 密钥在重启后会变化，原 JWT 和签名会话 Cookie 将无法继续验证。需要稳定登录状态时配置持久化 RSA 密钥：
 
-```bash
-ADMIN_CLIENT_ID=2
-ADMIN_CLIENT_REDIRECT_URIS=http://localhost:5173/admin-page/callback
-ADMIN_CLIENT_SCOPES=manage:system,manage:clients
-ADMIN_CLIENT_GRANT_TYPES=authorization_code,refresh_token
-OAUTH_ISSUER=http://localhost:8080
+```yaml
+jwt:
+  - kid: rsa1
+    alg: RS256
+    sec: ${JWT_PRIVATE_KEY}
 ```
 
-`issuer` 必须与实际公网访问地址一致；反向代理/HTTPS 部署时不要依赖默认值。
+`JWT_PRIVATE_KEY` 是完整的 PKCS#1 PEM 私钥内容（`BEGIN RSA PRIVATE KEY`），不是文件路径。生产需妥善保存该密钥。JWT Access Token 使用首个 RSA 密钥签名，管理端需要 RS256。密码使用随机 salt 的 Argon2id PHC 哈希。可选 Telegram 登录使用 `telegram.bot-name` 和 `telegram.bot-token`；未配置 token 时服务端拒绝 Telegram 登录。
 
-## 管理 SPA：auth-server-webui
+字段结构见 [config-schema.json](config-schema.json)，实际加载逻辑见 [internal/config.go](internal/config.go)。Schema 供配置参考，启动时不会执行 JSON Schema 校验。支持字符串及字符串数组中的 `${VAR}` / `${VAR:default}`，整数/布尔字段应直接使用 YAML 值。
 
-**现有工程符合简洁 React + Tailwind CSS 的技术方向，继续在此迭代，不另建 SPA。** 使用 TypeScript、Vite、React Router、pnpm 和 daisyUI；状态采用 Hooks/认证 Context，请求统一封装原生 `fetch`。可独立构建，但认证和管理仍依赖 OAuth2 端点及 `/api/admin/*`。
+服务**不会自动读取 `.env`**。根目录 [.env.example](.env.example) 是环境变量参考，可逐项 `export`，或交给 VS Code `envFile` / Docker `--env-file` 加载。`DB`、`REDIS_*`、Turnstile 等变量需在 YAML 中使用对应占位符；以下变量由代码直接覆盖配置：
 
-### 代码位置
-
-以下路径均位于 [auth-server-webui/](auth-server-webui/)：
-
-| 文件 | 职责 |
+| 变量 | 默认值 / 作用 |
 |---|---|
-| [package.json](auth-server-webui/package.json)、[vite.config.ts](auth-server-webui/vite.config.ts) | 依赖、构建和开发代理；开发端口固定 5173，后端默认 `http://localhost:8080` |
-| [src/main.tsx](auth-server-webui/src/main.tsx)、[src/App.tsx](auth-server-webui/src/App.tsx) | React 入口、StrictMode、`/admin-page` basename、路由、回调与权限门 |
-| [src/index.css](auth-server-webui/src/index.css) | Tailwind CSS + daisyUI |
-| [src/lib/auth.tsx](auth-server-webui/src/lib/auth.tsx)、[src/lib/auth-context.ts](auth-server-webui/src/lib/auth-context.ts)、[src/lib/api.ts](auth-server-webui/src/lib/api.ts) | PKCE 登录、内存 Token、刷新、401 重认证、API 请求 |
-| [src/lib/config.ts](auth-server-webui/src/lib/config.ts) | `VITE_*` 公共配置、API/Auth base URL、回调 URL、安全返回路径 |
-| [src/types.ts](auth-server-webui/src/types.ts)、[src/routes/admin/](auth-server-webui/src/routes/admin/) | snake_case DTO 与管理页面 |
+| `OAUTH_ISSUER` | 覆盖公网 issuer；未指定时使用 YAML 的 `issuer`，再回退到监听地址 |
+| `ADMIN_CLIENT_ID` | `2`；必须与前端 `VITE_ADMIN_CLIENT_ID` 一致 |
+| `ADMIN_CLIENT_DISPLAY_NAME` | `Auth Server Admin` |
+| `ADMIN_CLIENT_REDIRECT_URIS` | 逗号分隔的完整回调 URL；默认包含 localhost / 127.0.0.1 的 5173、8080 回调 |
+| `ADMIN_CLIENT_SCOPES` | 默认 `manage:system,manage:clients`；必须同时包含两者 |
+| `ADMIN_CLIENT_GRANT_TYPES` | 默认 `authorization_code,refresh_token`；必须含授权码，只允许这两类 |
 
-### 现况（Phase 1 实现后）
+`issuer` 必须是浏览器使用的公网 origin（协议、主机和端口一致，无路径前缀）。Vite 代理开发使用 `http://localhost:5173`；Go 独立托管使用 `http://localhost:8080`。使用 `127.0.0.1` 访问时也要同步修改 issuer。错误的 origin 会导致浏览器写请求被拒绝。
 
-| 模块 | 状态 |
-|---|---|
-| 路由 | 已迁移到 `/admin-page/*`，BrowserRouter basename 与 Vite base 一致；未知页面 404，缺 Scope 403 |
-| PKCE | Web Crypto 生成 verifier/state/challenge；token 兑换只发送 `client_id`、`code_verifier`、`redirect_uri`，不再携带 secret |
-| Token | 仅存内存，不写 localStorage；支持续期、401 单次重试、刷新页面后重新走授权；退出仅清理本地状态（服务端退出见 Phase 4） |
-| 权限 | 管理 API 校验 JWT 签名/claims、Redis 撤销、管理客户端、真实用户和 `auth_admin`；`manage:system`/`manage:clients` 按路由校验；旧 `/admin/*` 已删除 |
-| 管理页面 | 用户/客户端/管理员已有查询、新建、删除；编辑、启停、密码重置仍为 Phase 3；会话页明确标注 Phase 4，不再返回假成功 |
-| API | 客户端 DTO 已改为 snake_case；客户端 secret 列表不返回，创建时单次展示；统一处理 401/403 与 API 错误 |
-| 交付 | 可生成独立 `dist/`；`-tags embedspa` 将 SPA 嵌入 Go 单二进制；Docker 多阶段构建已包含前端；独立静态托管/CORS 仍为可选部署方式 |
+### 2. 初始化或升级 PostgreSQL
 
-验证：`go build ./...`、`go vet ./...`、`go test ./...` 通过；`pnpm build`、`pnpm lint` 通过。已在测试 PostgreSQL/Redis 上使用 Turnstile 测试密钥完成 160 项 HTTP/代理回归，0 项失败；覆盖 OAuth/PKCE 成功流、token/refresh 轮换、JWT 管理 API、普通用户/公共客户端、非管理员/缺 Scope/客户端凭据拒绝、授权码重放、错误 PKCE、错误 state/redirect、旧路由 404、管理员移除即时失效、Redis 撤销、会话/consent 数组清理、服务重启幂等和 Vite 路由/代理。3 项已知问题：stale 登录页可切换 session 用户、跨客户端 refresh 未被拒绝、最后一名管理员可被移除；UserInfo Bearer/ID Token 属 Phase 5。真实浏览器自动化/视觉验收仍待补。
-
-### SPA 实现约定（Phase 1 已落实）
-
-- **保持简单**：沿用现有技术栈和 daisyUI，不引入重型后台框架、SSR 或复杂状态库。页面使用函数组件/Hooks；`lib/` 放认证/API，`routes/` 放页面，`types.ts` 放 DTO。
-- **路由隔离**：统一 `/admin-page` 前缀、Vite base 和 Router basename；仅页面路由使用 SPA fallback，API 和缺失资源不得返回 HTML。未知页面显示 404，无权限显示 403。
-- **公共客户端登录**：授权码 + S256 PKCE，精确注册开发/生产回调 URL，不携带 secret。密码、Telegram 登录及授权确认交给授权服务器；兑换时传 `client_id`、`code_verifier` 和原 `redirect_uri`。
-- **授权请求保护**：用 Web Crypto 生成随机数和 challenge；state/verifier、时间和站内返回路径按请求暂存 `sessionStorage`（10 分钟 TTL），成功/失败/取消后清理。校验 state、防重复兑换、清除地址栏 code/state，禁止外部返回 URL 和敏感认证日志。
-- **Token 生命周期**：access/refresh token 仅存内存，不写 `localStorage`；页面刷新后经授权服务器会话重新授权。请求前完成认证初始化，统一 Bearer 注入、续期、401 重认证和 403 提示；权限最终由服务端校验。
-- **公开配置**：提供 [.env.example](auth-server-webui/.env.example)，使用 `VITE_ADMIN_CLIENT_ID`、`VITE_AUTH_BASE_URL`、`VITE_API_BASE_URL`；后两者默认当前 origin，回调默认为 SPA origin + `/admin-page/callback`。`VITE_*` 不得包含 secret。开发用 localhost、生产用 HTTPS；代理不覆盖 SPA 路径，跨域时明确允许来源、方法及 Authorization 头。
-- **交互与数据**：简单导航、表格、表单和确认弹窗，支持窄屏、标签及键盘操作。提供加载/空数据/成功/失败状态，防重复提交，危险操作需确认；未实现功能标注不可用。使用 snake_case DTO，secret 仅创建/重置时单次展示，会话不暴露原始 Token。
-- **独立交付**：保留 `pnpm dev/build/lint` 和独立 `dist/`；生产可用 `go build -tags embedspa` 把 `dist/` 嵌入单二进制，不需要单独启动静态服务器。
-
-目标路由与对应 API 使用相同权限映射；受保护页面还必须校验管理员身份和管理客户端：
-
-| 路径（前缀 `/admin-page`） | 页面 / 权限 |
-|---|---|
-| `/login`、`/callback` | 登录入口、回调；回调须验证本次授权请求 |
-| `/` | 导航首页；至少一个管理 Scope |
-| `/users`、`/admins`、`/sessions` | 用户、管理员、会话；`manage:system` |
-| `/clients` | 客户端；`manage:clients` |
-
-## Phase 1 本地验收
-
-### 1. 数据库
-
-全新数据库：
+下面的 `DB` 应指向目标 PostgreSQL，并包含 `search_path=auth`；当前表及管理客户端序列固定使用 `auth` schema。
 
 ```bash
-psql "$DB" -f db/postgres.sql
+export DB='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable&search_path=auth'
 ```
 
-已有数据库（保留数据）：
+**仅全新数据库**使用基础 schema；该脚本包含 `DROP TABLE`，会删除现有认证数据：
 
 ```bash
-psql "$DB" -f db/migrations/001_phase1_admin_spa.sql
-psql "$DB" -f db/migrations/002_identity_constraints.sql
+psql "$DB" -v ON_ERROR_STOP=1 -f db/postgres.sql
 ```
 
-迁移会为 `auth_client` 增加 `is_public`、`redirect_uris`、`grant_types`，并为 `auth_admin.user_id` 增加唯一约束。`002_identity_constraints.sql` 还会为邮箱（大小写不敏感）和 `(provider_type, login_key)` 增加唯一索引，并移除隐式 implicit grant。若已有重复邮箱、重复外部身份或重复管理员记录，迁移会失败，需要先备份并人工去重。
-
-### 2. 启动后端
-
-需要 PostgreSQL、Redis、Turnstile 配置。服务启动时会幂等创建/更新 `client_id=2` 的管理客户端，**该 ID 必须没有被其他应用占用**：
+已有数据库先备份，再按顺序应用增量迁移，保留原有数据：
 
 ```bash
-export ADMIN_CLIENT_ID=2
-export ADMIN_CLIENT_REDIRECT_URIS=http://localhost:5173/admin-page/callback,http://127.0.0.1:5173/admin-page/callback,http://localhost:8080/admin-page/callback,http://127.0.0.1:8080/admin-page/callback
-export OAUTH_ISSUER=http://localhost:5173 # Vite 代理开发；Go 独立托管时改为 8080
-go run .
+psql "$DB" -v ON_ERROR_STOP=1 -f db/migrations/001_phase1_admin_spa.sql
+psql "$DB" -v ON_ERROR_STOP=1 -f db/migrations/002_identity_constraints.sql
 ```
+
+001 增加公共客户端、回调列表、grant_types 及管理员唯一约束；002 增加大小写不敏感邮箱和 `(provider_type, login_key)` 唯一索引，并移除已有客户端的 implicit grant。重复邮箱、外部身份或管理员记录会导致对应迁移失败并回滚，需先人工去重。全新 schema 已包含上述变更，无需再执行迁移。
+
+升级后，没有安全元数据的旧授权码、Access/Refresh Token 和 SSO Session 会被拒绝，需要重新登录。密码只支持 Argon2id；旧 SHA-256 密码记录需重置。
 
 ### 3. 手工创建首位管理员
 
-Phase 1 按约定不自动创建管理员。使用 [db/seed_admin.example.sql](db/seed_admin.example.sql)：
+服务不自动创建管理员。使用 [db/seed_admin.example.sql](db/seed_admin.example.sql) 创建 `auth_user`、EmailPassword provider 和 `auth_admin` 记录：
 
 ```bash
+go mod download
 read -r -s PASSWORD
 HASH=$(printf '%s' "$PASSWORD" | go run ./cmd/hash-password)
+unset PASSWORD
 psql "$DB" \
   -v admin_email='admin@example.com' \
   -v admin_display_name='Admin' \
   -v admin_password_hash="$HASH" \
   -f db/seed_admin.example.sql
+unset HASH
 ```
 
-脚本会创建 `auth_user`、`auth_user_provider`（EmailPassword）和 `auth_admin` 记录。密码使用带随机 salt 的 Argon2id PHC 哈希；`cmd/hash-password` 从标准输入读取密码并输出哈希，不会把密码写入 shell 参数或数据库明文。 由于项目尚未投产，本次不做 SHA-256 兼容；已有 SHA-256 密码记录的账号需要重置密码。
+使用至少 12 个字符的密码，与管理 API 的新建用户规则保持一致；哈希工具本身只校验非空及长度上限。工具从标准输入读取密码，输出随机 salt 的 Argon2id PHC 哈希。SQL seed 对已有 EmailPassword 记录不会改写密码，不能用作密码重置工具。
 
-### 4. 启动 SPA
+### 4. 启动后端和 SPA
+
+在已配置 Turnstile 环境变量的终端中，从项目根目录运行：
+
+```bash
+export OAUTH_ISSUER=http://localhost:5173
+export ADMIN_CLIENT_ID=2
+go run .
+```
+
+服务启动时会创建或覆盖管理客户端的配置，**该 ID 必须没有被其他应用占用**。其回调、Scope、授权类型、公共客户端属性、空 secret 和 JWT 类型由服务端接管。
+
+另开终端启动前端；首次配置时参考 [auth-server-webui/.env.example](auth-server-webui/.env.example) 创建前端 `.env`：
 
 ```bash
 cd auth-server-webui
-cp .env.example .env
-pnpm install
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-打开 `http://localhost:5173/admin-page/`。未登录时 SPA 会自动跳转 `/oauth2/authorize`，完成密码登录和 Scope 同意后回到 `/admin-page/callback`。开发代理会把 `/oauth2`、`/login`、`/auth`、`/api` 转发到 `http://localhost:8080`。
+打开 `http://localhost:5173/admin-page/`，完成密码或 Telegram 登录与 Scope 同意。开发端口固定 5173；代理目标默认 `http://localhost:8080`，可通过启动 Vite 时的 `BACKEND_URL` 环境变量修改。
 
-Token 仅存内存；刷新页面会重新经过授权服务器。由于 Phase 1 不持久化 consent，刷新后需要重新确认 Scope（这是当前约定）。
+代理覆盖 `/assets`、`/oauth2`、`/login`、`/logout`、`/auth`、`/api`、`/registration`、`/userinfo`、`/introspect`、`/.well-known`；`/admin-page/*` 由 Vite 提供。
 
-### 5. 单二进制生产构建（嵌入 SPA）
+## 管理 SPA 与 API
 
-生产环境不需要单独启动静态服务器。先构建前端，再用 `embedspa` 标签构建 Go：
+详细前端操作见 [auth-server-webui/README.md](auth-server-webui/README.md)。沿用现有 React/Hooks、认证 Context、原生 `fetch` 和 daisyUI；前端 DTO 使用 snake_case。
+
+| 代码位置 | 职责 |
+|---|---|
+| [src/App.tsx](auth-server-webui/src/App.tsx)、[src/main.tsx](auth-server-webui/src/main.tsx) | `/admin-page` basename、页面、权限门、回调与路由 |
+| [src/lib/auth.tsx](auth-server-webui/src/lib/auth.tsx) | PKCE、state 校验、内存 Token、刷新与服务端退出 |
+| [src/lib/api.ts](auth-server-webui/src/lib/api.ts)、[src/lib/config.ts](auth-server-webui/src/lib/config.ts) | Bearer 请求、401 单次刷新重试、公开配置、安全返回路径 |
+| [src/routes/admin/](auth-server-webui/src/routes/admin/)、[src/types.ts](auth-server-webui/src/types.ts) | 管理页面与 DTO |
+| [internal/http/gin_router.go](internal/http/gin_router.go)、[internal/http/admin/api.go](internal/http/admin/api.go) | 实际路由、管理员认证、Scope、近期认证及管理处理 |
+
+- Access/Refresh Token 仅存内存，不写 `localStorage`；刷新页面后重新授权。当前不持久化 consent，因此仍需重新确认 Scope。
+- verifier/state、创建时间与站内返回路径暂存 `sessionStorage`，10 分钟失效；回调校验 state、避免重复兑换，并清除地址栏 code/state。
+- 退出会调用 `POST /logout`，使该用户所有现有授权和 SSO 会话失效，仅在服务端成功后清理本地 Token。退出进行中禁用重复操作，失败时保留当前页面并显示错误，成功后跳转登录页。普通刷新不会延长管理员写操作的 15 分钟凭据认证窗口，超时需退出并重新登录。
+- 缺少页面 Scope 显示 403，未知页面显示 404；最终权限由服务端校验。删除最后一名管理员或其用户记录会被事务保护拒绝。
+
+| SPA 路径（前缀 `/admin-page`） | JSON API / 权限 |
+|---|---|
+| `/login`、`/callback` | 登录入口、PKCE 回调；无对应管理写 API |
+| `/` | `GET /api/admin/me`；首页需要至少一个管理 Scope |
+| `/users` | `GET/POST /api/admin/users`、`DELETE /api/admin/users/:id`；`manage:system` |
+| `/clients` | `GET/POST /api/admin/clients`、`DELETE /api/admin/clients/:id`；`manage:clients` |
+| `/admins` | `GET/POST /api/admin/admins`、`DELETE /api/admin/admins/:user_id`；`manage:system` |
+| `/sessions` | `GET /api/admin/sessions` 返回用户记录、`DELETE /api/admin/sessions/:user_id` 撤销该用户所有现有授权及 SSO；`manage:system` |
+
+以上管理 API 均要求管理客户端的有效用户 Token 和管理员身份，写操作另校验近期认证。旧 `/admin/*` 路由已移除。
+
+## OAuth2 及元数据端点
+
+| 方法与路径 | 当前行为 |
+|---|---|
+| `GET/POST /oauth2/authorize` | 授权码请求与 POST 授权确认/拒绝；仅支持 `response_type=code`、S256 PKCE |
+| `POST /oauth2/token` | 授权码兑换、刷新、机密客户端凭据；按客户端限制 Scope 和 grant |
+| `GET /.well-known/openid-configuration` | 使用配置的 issuer；声明 code、S256、三种已实现 grant；尚无 ID Token |
+| `GET /.well-known/jwks.json` | 发布配置密钥的 JWK；RSA 的 `n`/`e` 使用无填充 base64url |
+| `POST /introspect` | HTTP Basic 认证，仅机密客户端可查询自身 Access Token；无效、撤销、不属自身的 Token 返回 `active:false` |
+| `GET/POST /userinfo` | 支持 Bearer 用户 Access Token，要求 `profile`，当前只返回 `sub`；也保留 Basic + POST 表单 `token` 的同客户端查询方式 |
+| `GET /logout` | 返回当前会话的 CSRF Token，不执行退出 |
+| `POST /logout` | Bearer 认证，或 Cookie + `X-CSRF-Token`；撤销用户所有现有授权及 SSO，成功返回 204 |
+
+当前 Scope 为 `profile`、`avatar`、`manage:system`、`manage:clients`。`avatar` 已定义，但 UserInfo 尚不返回头像或其他资料 claims。授权码 Access Token 默认有效期 2 小时，Refresh Token 默认 3 天；刷新带轮换和重放检测，不能扩大原 Scope。
+
+## 构建与部署
+
+### Go 托管管理 SPA
+
+从项目根目录构建：
 
 ```bash
+pnpm --dir auth-server-webui install --frozen-lockfile
 pnpm --dir auth-server-webui build
 go build -tags embedspa -o auth-server .
-./auth-server
+OAUTH_ISSUER=http://localhost:8080 ./auth-server
 ```
 
-打开 `http://localhost:8080/admin-page/`。此时 `/admin-page/*` 的 SPA shell、深链和带哈希的静态资源都由 Go 二进制提供。
+打开 `http://localhost:8080/admin-page/`。`-tags embedspa` 将 `auth-server-webui/dist/` 嵌入二进制；未先构建前端时，embed 构建会失败。默认 `go build ./...` 不嵌入 SPA，`/admin-page` 需由 Vite 或反向代理提供。
 
-- 默认 `go build ./...` 仍可正常编译，不嵌入 SPA；Vite dev 继续使用独立的 `5173` 服务。
-- `-tags embedspa` 会嵌入 `auth-server-webui/dist`；如果未先构建前端，Go 构建会直接失败，避免发布空壳 SPA。
-- Dockerfile 已改为 Node 构建 + Go 嵌入的多阶段构建。
-- 生产域名和回调需通过 `ADMIN_CLIENT_REDIRECT_URIS` / `VITE_ADMIN_REDIRECT_URI` 配置；默认已包含本机 `8080` 回调。
-- 资源缓存：`/admin-page/assets/*` 使用一年 immutable，`index.html` 与 SPA 深链使用 `no-store`，缺失的 `.js/.css` 返回 404，不会错误回退成 HTML。
+**嵌入的只有管理 SPA。** 运行目录仍需 `config.yaml`、`template/` 和 `assets/bulma.min.css`；根路径图片使用 `placeholder.jpg`，缺失时返回文字占位。复制二进制部署时需同时提供这些运行文件，无需额外启动前端静态服务器。
 
-### 6. 建议验收项
+管理静态资源 `/admin-page/assets/*` 缓存一年并标记 immutable；首页和深链使用 `no-store`。缺失 JS/CSS 返回 404，不回退成 HTML。
 
-- 未登录进入 `/admin-page/users`，完成 PKCE 登录后回到原路径。
-- 只勾选一个管理 Scope，确认另一个页面的导航隐藏、直接访问返回 403。
-- 错误 state、重复 callback、取消授权、非管理员登录应失败且不留下可用 Token。
-- 移除 `auth_admin` 记录后，原 Access Token 的下一次管理请求应返回 403。
-- 旧 `/admin/client/*`、`/admin/accounts/*` 应返回 404。
-- `GET /api/admin/clients` 不得包含 secret。
+`VITE_*` 是前端开发/构建时的公开配置，不得包含 secret；修改后需重启 Vite 或重新构建前端及嵌入二进制。独立静态产物可交给同源反向代理托管；当前后端没有 CORS 允许来源配置，直接换成跨域 Auth/API 地址并不能完成部署。
 
-## TODO
+### Docker 与反向代理
 
-**先行目标：Phase 1 特权管理客户端迁移已完成代码实现，并已在测试 PostgreSQL/Redis/Turnstile 环境完成后端与代理链路验收；真实浏览器自动化验收仍待补，Phase 2+ 未完成。**
+[Dockerfile](Dockerfile) 使用 Node 构建前端、Go 嵌入 SPA，并以 UID/GID `10001:10001` 运行。配置不会复制进镜像，需挂载到 `/app/config.yaml`；文件和密钥需对该用户可读。
 
-### Phase 1：特权管理客户端迁移（优先）
+```bash
+docker build -t auth-server:local .
+# 先准备容器配置和 .env（包含 YAML 引用的全部变量）。
+docker run --rm -p 127.0.0.1:8080:8080 \
+  --env-file .env \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  auth-server:local
+```
 
-- [x] 固定 BIGINT 管理客户端 ID=2 的幂等 seed，接管并更新其回调、Scope、授权类型；前后端通过同名环境变量/default 对齐。
-- [x] 区分 public/confidential 客户端，取消 `IsPublic() = false` 的固定实现；SPA 使用无 secret 的 PKCE 登录。
-- [x] 提供手工首位管理员 SQL，为 `auth_admin.user_id` 添加唯一约束。
-- [x] 接通 `manage:system/manage:clients` 的解析、同意与签发；管理 API 校验 JWT、管理客户端、Scope、真实用户和 `auth_admin`，拒绝客户端凭据 Token。
-- [x] 自定义 JWT claims（`sub/client_id/scope/jti/iss/aud/iat/exp`），验签后检查 Redis 撤销；移除管理员后即时失效；关闭旧 `/admin/*` 入口。
-- [x] 完整保存 client、redirect URI、response type、state、Scope、PKCE 参数，按请求隔离 consent；SPA 已迁移到 `/admin-page`。
-- [x] **后端与代理端到端验收**：管理客户端初始化、PKCE 成功、token/refresh、state 错误、授权码重放、错误 PKCE、非管理员/缺 Scope/客户端凭据拒绝、旧入口 404、移除管理员即时失效、Redis 撤销、Vite `/admin-page` 深链与代理均已验证。
-- [ ] **浏览器 UI 自动化验收**：真实浏览器完成取消授权、子路由刷新、403/404 展示、窄屏/键盘交互及完整视觉回归。
+容器中的 `host` 应设为 `0.0.0.0`；PostgreSQL/Redis 地址需使用容器可访问的服务地址，不能沿用指向容器自身的 localhost。生产还需：
 
-### Phase 2：授权与登录安全
+- HTTPS 反代、正确的 `OAUTH_ISSUER` 和精确的 HTTPS 管理回调；Go 当前通过 HTTP 监听，TLS 由反代终止。
+- `trusted-proxies` 仅列实际代理的 IP/CIDR，登录限速才会采用其 `X-Forwarded-For`；默认忽略转发头。
+- Redis 可配置 `username`、`password`、`tls: true`；它保存 Token、会话、刷新族和用户安全版本等状态，应保留撤销元数据并配置持久化。
+- PostgreSQL 数据、配置和持久密钥的备份恢复；数据库迁移需在启动前手工执行。
 
-- [x] 刷新时校验客户端身份和 Token 归属；授权码、客户端凭据、刷新流程统一限制 Scope/授权类型。
-- [x] `POST /login` 已登录守卫：session 已有用户时拒绝/复用登录，禁止 stale 登录页切换账号。
-- [x] Telegram 签名 ID 必须与登录账户绑定，检查 `auth_date` 有效期及异常输入。
-- [x] 授权确认增加请求绑定、CSRF 防护及拒绝流程，不直接信任 `consented`。
-- [x] 替换无盐 SHA-256 密码存储：新密码使用 Argon2id（随机 salt、PHC 编码）；由于项目未投产，不做旧哈希兼容。
-- [ ] **测试**：错误 PKCE、授权码重放、过期 Token、回调绕过、刷新凭据错误/跨客户端刷新、Scope 扩大、Telegram 身份错配。
+## 验证
 
-> Phase 1 已对管理客户端和新客户端执行精确 redirect URI 匹配；相似域名/未注册路径会在授权入口拒绝。
+2026-10-30 本次整理后执行并通过；完整结果见 [回归报告](test/regression-report-2026-10-30.md)：
 
-### Phase 3：管理功能
+```bash
+go test -race ./...
+go vet ./...
+go build ./...
+python3 test/securityaudit/run.py
+pnpm --dir auth-server-webui lint
+pnpm --dir auth-server-webui build
+go build -tags embedspa -o /tmp/auth-server-embed-check .
+```
 
-- [x] 修复客户端创建显式插入零值 ID，返回真实标识；统一 JSON DTO，修复字段大小写与 snake_case 不一致，列表不返回 secret。
-- [ ] 用户：编辑、启停、密码重置及关联 Token/Session 失效。
-- [ ] 客户端：编辑、启停、多回调地址、Scope、grant_types；防止误删或破坏内置管理客户端（当前仅禁止删除 ID=2）。
-- [x] 管理员：唯一约束及外键校验；删除管理员和删除用户在事务锁内保护最后一名管理员。
-- [ ] 列表分页/查询、统一错误反馈；处理事务提交失败及登录标识唯一约束。
-- [ ] **测试**：连续创建客户端、DTO 契约、状态变更、权限拒绝及管理员变更。
+隔离安全回归通过 Go overlay 直接测试实际生产包，包含 50 项顶层安全测试，并同时运行普通 Go 测试；使用原样的 `go.mod/go.sum`，替换数据库驱动、Redis 命令及外部请求，不接触现有用户和令牌。覆盖客户端认证、PKCE、授权码重放、刷新轮换/重放/跨客户端保护、Scope、JWT、Telegram、CSRF/Origin、SID、退出、撤销并发、最后管理员保护及近期认证。详见 [test/securityaudit/README.md](test/securityaudit/README.md)。普通 `go test ./...` 不包含这些 `.go.fixture` 测试，必须单独运行脚本。
 
-### Phase 4：会话与 Token
+本次还在授权的测试 PostgreSQL/Redis 上运行了独立数据库和键命名空间的实时回归，验证约束、迁移、事务锁、刷新并发、真实 Lua/TTL 与撤销，并完成 Chromium 浏览器回归。运行方式和验证边界见 [test/README.md](test/README.md)。Turnstile 使用测试替身；真实第三方服务、HTTPS 反代、Redis Cluster、Docker 镜像构建及线上部署未验收。
 
-- [ ] 建立用户/客户端/Token/Session 索引，查询真实活跃会话和过期信息。
-- [x] 实现用户级强制下线：通过安全版本号使现有 Token、授权码及 SSO Session 失效；单会话管理仍待实现。
-- [x] 实现服务端全局退出及管理端接入；前端协调刷新与退出。按客户端或单会话退出尚未实现。
-- [ ] 完善刷新轮换、旧 Token 失效及重放检测，与用户禁用、客户端停用和管理员变更联动。
-- [ ] **测试**：撤销后访问/刷新、退出后访问/重新登录、到期和多会话下线。
+[安全 CI](.github/workflows/security.yml) 已配置 Go race/vet、隔离回归、govulncheck，以及前端 lint/build/audit，以及独立 PostgreSQL/Redis 与浏览器回归；[镜像 CI](.github/workflows/docker-image.yml) 依赖安全任务通过后构建并推送镜像。工作流已存在不代表本次已运行远程 CI。
 
-### Phase 5：OAuth2 / OIDC 兼容
+## 后续工作
 
-- [ ] Discovery 使用独立公网 issuer，适配 HTTPS/代理，仅声明已实现能力；明确是否保留 implicit 模式及其与 PKCE 的关系。
-- [ ] 实现 openid/email Scope、ID Token 和 nonce 校验；UserInfo 支持 Bearer、GET/POST，按 Scope 返回 claims。
-- [ ] Introspection 先设状态码再写响应；无效 Token 返回 `active:false`，正确处理认证失败，返回 Token 所属 client_id。
-- [ ] 统一 JWT 配置与实际算法，修正 JWK 编码和密钥发布/轮换，区分 Access Token 与 ID Token claims。
-- [ ] **测试**：Discovery、UserInfo、Introspection、JWT/JWKS 及 OIDC 客户端对接。
+以下保留原 Phase 编号，列出各阶段剩余工作；已实现项见项目现状与端点表。
 
-### Phase 6：部署与交付
-
-- [x] 支持 Go embed 单二进制部署；Dockerfile 增加前端构建；嵌入二进制的 SPA 路由、深链、资源和回调路径已验证（Docker 镜像构建待有 Docker 的环境验证）。
-- [ ] 支持独立静态托管与 CORS 配置，供非 Go 托管场景使用。
-- [ ] 提供增量数据库迁移管理，修复 PostgreSQL 外键删表顺序（基础 schema 已修正），明确遗留 MySQL 支持范围。
-- [ ] 补齐脱敏配置、首次初始化、PostgreSQL/Redis/Turnstile 依赖、HTTPS/代理、密钥管理、备份恢复和升级说明。
-- [ ] CI 接入 Go 测试、前端 build/lint，修复现有 lint 错误；增加隔离数据库/Redis 集成测试和浏览器登录测试。
-- [ ] **验收**：全新安装、保留数据升级、重启后登录/Token、生产镜像及独立静态部署中的管理与撤销流程。
+- **Phase 1 / 管理 SPA 验收**：基础浏览器回归已覆盖 PKCE、取消授权、深链、403/404、窄屏和键盘交互；仍需跨浏览器及完整视觉验收。
+- **Phase 2 / 授权与登录安全**：已有隔离及 PostgreSQL/Redis 实时回归；补真实 Turnstile、TLS/代理和网络故障验证。
+- **Phase 3 / 管理功能**：用户编辑、启停、密码重置；客户端编辑、启停、secret 重置；列表分页/查询和错误反馈完善。多回调、Scope、grant_types 已支持创建时配置。
+- **Phase 4 / 会话管理**：真实活跃会话索引、到期信息、按客户端/单会话撤销；将未来的用户禁用、客户端停用接入现有撤销机制。用户级强制下线、全局退出、刷新轮换及重放检测已实现。
+- **Phase 5 / OIDC**：`openid`/`email`、ID Token、nonce、按 Scope 返回资料 claims；完善密钥轮换管理和客户端兼容性验证。Discovery、Bearer UserInfo、Introspection、RSA JWK 编码已有实现。
+- **Phase 6 / 部署交付**：自动迁移管理、跨域静态托管/CORS、备份恢复操作说明，以及全新安装、保留数据升级、生产镜像和重启恢复验收。

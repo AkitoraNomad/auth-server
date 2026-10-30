@@ -312,45 +312,58 @@ func (m *clientBoundManager) policyActive(ctx context.Context, policy grantPolic
 	return err == nil && version == policy.Version
 }
 
-func (m *clientBoundManager) validateToken(ctx context.Context, ti oauth2.TokenInfo, familyKey string) error {
+func (m *clientBoundManager) validateToken(ctx context.Context, ti oauth2.TokenInfo, familyKey string) (grantPolicy, error) {
 	family, err := m.rdb.Get(ctx, familyKey).Result()
 	if err != nil {
-		return oauth2errors.ErrInvalidGrant
+		return grantPolicy{}, oauth2errors.ErrInvalidGrant
 	}
 	policy, err := m.familyPolicy(ctx, family)
 	if err != nil || policy.UserID != ti.GetUserID() || policy.ClientID != ti.GetClientID() || !m.policyActive(ctx, policy) {
-		return oauth2errors.ErrInvalidGrant
+		return grantPolicy{}, oauth2errors.ErrInvalidGrant
 	}
-	return nil
+	return policy, nil
 }
+
+// The authentication time travels with a validated token for this request only.
+// It is not persisted in, or trusted from, client-supplied token claims.
+type authenticatedAccessToken struct {
+	oauth2.TokenInfo
+	authTime time.Time
+}
+
+func (t *authenticatedAccessToken) AuthenticationTime() time.Time { return t.authTime }
 
 func (m *clientBoundManager) LoadAccessToken(ctx context.Context, token string) (oauth2.TokenInfo, error) {
 	ti, err := m.Manager.LoadAccessToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if err = m.validateToken(ctx, ti, accessFamilyPrefix+token); err != nil {
+	policy, err := m.validateToken(ctx, ti, accessFamilyPrefix+token)
+	if err != nil {
 		return nil, err
 	}
-	return ti, nil
+	var authTime time.Time
+	if policy.UserID != "" && policy.AuthTime > 0 {
+		authTime = time.Unix(policy.AuthTime, 0)
+	}
+	return &authenticatedAccessToken{TokenInfo: ti, authTime: authTime}, nil
 }
 
-// Refreshing does not renew the authentication time. Sensitive administrator
-// writes require a credential sign-in within the preceding fifteen minutes.
-func (m *clientBoundManager) RecentlyAuthenticated(ctx context.Context, token string) bool {
-	if _, err := m.LoadAccessToken(ctx, token); err != nil {
+func IsRecentAuthentication(authTime time.Time) bool {
+	if authTime.IsZero() {
 		return false
 	}
-	family, err := m.rdb.Get(ctx, accessFamilyPrefix+token).Result()
+	age := time.Since(authTime)
+	return age >= -time.Minute && age <= 15*time.Minute
+}
+
+// Refreshing does not renew the credential authentication time.
+func (m *clientBoundManager) RecentlyAuthenticated(ctx context.Context, token string) bool {
+	ti, err := m.LoadAccessToken(ctx, token)
 	if err != nil {
 		return false
 	}
-	policy, err := m.familyPolicy(ctx, family)
-	if err != nil || policy.AuthTime <= 0 || policy.UserID == "" {
-		return false
-	}
-	age := time.Since(time.Unix(policy.AuthTime, 0))
-	return age >= -time.Minute && age <= 15*time.Minute
+	return IsRecentAuthentication(ti.(*authenticatedAccessToken).authTime)
 }
 
 func (m *clientBoundManager) LoadRefreshToken(ctx context.Context, token string) (oauth2.TokenInfo, error) {
@@ -358,7 +371,7 @@ func (m *clientBoundManager) LoadRefreshToken(ctx context.Context, token string)
 	if err != nil {
 		return nil, err
 	}
-	if err = m.validateToken(ctx, ti, refreshFamilyPrefix+token); err != nil {
+	if _, err = m.validateToken(ctx, ti, refreshFamilyPrefix+token); err != nil {
 		return nil, err
 	}
 	return ti, nil

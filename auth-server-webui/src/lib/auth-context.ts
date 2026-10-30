@@ -9,14 +9,15 @@ export interface SessionState {
   user: User | null
 }
 
-export type AuthStatus = 'anonymous' | 'authenticated' | 'error'
+export type AuthStatus = 'anonymous' | 'authenticated' | 'error' | 'signed-out'
 
 export interface AuthContextValue {
   status: AuthStatus
   session: SessionState | null
   error: string | null
   login: (returnTo?: string) => void
-  logout: () => void
+  signingOut: boolean
+  logout: () => Promise<boolean>
   handleCallback: (
     code: string,
     state: string,

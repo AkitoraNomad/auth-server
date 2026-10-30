@@ -58,6 +58,12 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
+		if c.Request.URL.Path == internal.PathAuth {
+			// Native same-origin form POSTs need an Origin header. no-referrer
+			// makes Chromium send Origin: null, which must remain untrusted.
+			// Cross-origin navigation still receives no Referer from this page.
+			h.Set("Referrer-Policy", "same-origin")
+		}
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		h.Set("Content-Security-Policy", strings.Join([]string{

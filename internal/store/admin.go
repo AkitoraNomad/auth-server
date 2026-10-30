@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	"log/slog"
-	"net/url"
 	"slices"
 	"strings"
 )
@@ -24,15 +23,6 @@ func IsAdmin(ctx context.Context, userID int64) (bool, error) {
 		return false, err
 	}
 	return exists, nil
-}
-
-// CountAdmins returns the number of administrator records.
-func CountAdmins(ctx context.Context) (int64, error) {
-	var count int64
-	if err := internal.DB.GetContext(ctx, &count, `SELECT COUNT(*) FROM auth_admin`); err != nil {
-		return 0, err
-	}
-	return count, nil
 }
 
 type adminClientSeed struct {
@@ -142,13 +132,6 @@ func buildAdminClientSeed(clientID int64, displayName string, redirectURIs, scop
 		uri := strings.TrimSpace(raw)
 		if !model.ValidRedirectURI(uri) {
 			return adminClientSeed{}, fmt.Errorf("insecure admin redirect URI: %q", raw)
-		}
-		u, err := url.Parse(uri)
-		if err != nil || u.Scheme == "" || u.Host == "" || u.Fragment != "" {
-			return adminClientSeed{}, fmt.Errorf("invalid admin redirect URI: %q", raw)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return adminClientSeed{}, fmt.Errorf("admin redirect URI must use http or https: %q", raw)
 		}
 		if _, ok := seenURI[uri]; ok {
 			continue

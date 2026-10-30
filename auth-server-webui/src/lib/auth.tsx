@@ -130,7 +130,8 @@ async function postToken(body: URLSearchParams): Promise<TokenResponse> {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSessionState] = useState<SessionState | null>(null)
-  const [status, setStatus] = useState<AuthStatus>('anonymous')
+  const [logoutState, setLogoutState] = useState<'idle' | 'pending' | 'complete'>('idle')
+  const signingOut = logoutState === 'pending'
   const [error, setError] = useState<string | null>(null)
   const sessionRef = useRef<SessionState | null>(null)
   const authGenerationRef = useRef(0)
@@ -141,8 +142,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const setSession = useCallback((next: SessionState | null) => {
     sessionRef.current = next
     setSessionState(next)
-    api.setToken(next?.accessToken ?? null)
-    setStatus(next ? 'authenticated' : 'anonymous')
   }, [])
 
   const refreshAccessToken = useCallback(async (): Promise<SessionState | null> => {
@@ -178,7 +177,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         if (generation !== authGenerationRef.current) return null
         setSession(null)
-        setStatus('error')
         setError(errorMessage(err) || 'Your session expired. Please sign in again.')
         return null
       } finally {
@@ -191,6 +189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [setSession])
 
   const login = useCallback((returnTo?: string) => {
+    setLogoutState('idle')
     const run = async () => {
       const verifier = randomValue(32)
       const state = randomValue(24)
@@ -216,7 +215,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     void run().catch((err: unknown) => {
       setError(errorMessage(err) || 'Unable to start sign in.')
-      setStatus('error')
     })
   }, [])
 
@@ -230,13 +228,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (oauthError) {
         clearPendingAuthorization()
         setError(errorDescription || oauthError)
-        setStatus('error')
         return null
       }
       if (!code || !state) {
         clearPendingAuthorization()
         setError('The authorization response is missing code or state.')
-        setStatus('error')
         return null
       }
 
@@ -248,19 +244,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const pending = readPendingAuthorization()
       if (!pending) {
         setError('This sign-in request is no longer valid. Please start again.')
-        setStatus('error')
         return null
       }
       if (Date.now() - pending.createdAt > PENDING_TTL_MS) {
         clearPendingAuthorization()
         setError('The sign-in request expired. Please try again.')
-        setStatus('error')
         return null
       }
       if (state !== pending.state) {
         clearPendingAuthorization()
         setError('The state check failed. Please start sign-in again.')
-        setStatus('error')
         return null
       }
 
@@ -276,11 +269,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }),
           )
           const initial = sessionFromToken(token)
-          api.setToken(initial.accessToken)
 
           let me: MeResponse
           try {
-            me = await api.getMe()
+            me = await api.getMe(initial.accessToken)
           } catch (err) {
             if (err instanceof ApiError && err.status === 403) {
               throw new Error('This account does not have administrator access.', { cause: err })
@@ -298,9 +290,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearPendingAuthorization()
           return safeReturnPath(pending.returnTo)
         } catch (err) {
-          api.setToken(null)
           setSession(null)
-          setStatus('error')
           setError(errorMessage(err) || 'Sign in failed. Please try again.')
           clearPendingAuthorization()
           return null
@@ -315,54 +305,57 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [setSession],
   )
 
-  const logout = useCallback(() => {
-    if (signingOutRef.current) return
+  const logout = useCallback(async (): Promise<boolean> => {
+    if (signingOutRef.current) return false
     signingOutRef.current = true
-    void (async () => {
-      try {
-        // Finish a refresh already in flight so logout uses its successor.
-        await refreshPromiseRef.current
-        const current = sessionRef.current
-        const token = current?.accessToken
-        authGenerationRef.current += 1
-        // A successful response means the server has invalidated the SSO
-        // session and every existing grant, including concurrent refreshes.
-        let headers: Record<string, string>
-        if (token) {
-          headers = { Authorization: `Bearer ${token}` }
-        } else {
-          const csrfResponse = await fetch(authUrl('/logout'), { credentials: 'include' })
-          if (!csrfResponse.ok) throw new Error('Unable to end the server session.')
-          const payload = await csrfResponse.json() as { data: { csrf_token: string } }
-          headers = { 'X-CSRF-Token': payload.data.csrf_token }
-        }
-        let response = await fetch(authUrl('/logout'), {
-          method: 'POST', credentials: 'include', headers,
-        })
-        // When the SSO cookie has expired, a live refresh token still
-        // represents a grant that must be revoked before reporting success.
-        if (response.status === 401 && current?.refreshToken) {
-          const renewed = await postToken(new URLSearchParams({
-            grant_type: 'refresh_token', client_id: ADMIN_CLIENT_ID,
-            refresh_token: current.refreshToken,
-          }))
-          setSession({ ...sessionFromToken(renewed), user: current.user })
-          response = await fetch(authUrl('/logout'), {
-            method: 'POST', credentials: 'include',
-            headers: { Authorization: `Bearer ${renewed.access_token}` },
-          })
-        }
-        if (!response.ok) throw new Error('Server sign out failed. Please try again.')
-        clearPendingAuthorization()
-        setSession(null)
-        setStatus('anonymous')
-        setError(null)
-      } catch (err) {
-        setError(errorMessage(err))
-      } finally {
-        signingOutRef.current = false
+    setLogoutState('pending')
+    setError(null)
+    try {
+      // Finish a refresh already in flight so logout uses its successor.
+      await refreshPromiseRef.current
+      const current = sessionRef.current
+      const token = current?.accessToken
+      authGenerationRef.current += 1
+      // A successful response means the server has invalidated the SSO
+      // session and every existing grant, including concurrent refreshes.
+      let headers: Record<string, string>
+      if (token) {
+        headers = { Authorization: `Bearer ${token}` }
+      } else {
+        const csrfResponse = await fetch(authUrl('/logout'), { credentials: 'include' })
+        if (!csrfResponse.ok) throw new Error('Unable to end the server session.')
+        const payload = await csrfResponse.json() as { data: { csrf_token: string } }
+        headers = { 'X-CSRF-Token': payload.data.csrf_token }
       }
-    })()
+      let response = await fetch(authUrl('/logout'), {
+        method: 'POST', credentials: 'include', headers,
+      })
+      // When the SSO cookie has expired, a live refresh token still
+      // represents a grant that must be revoked before reporting success.
+      if (response.status === 401 && current?.refreshToken) {
+        const renewed = await postToken(new URLSearchParams({
+          grant_type: 'refresh_token', client_id: ADMIN_CLIENT_ID,
+          refresh_token: current.refreshToken,
+        }))
+        setSession({ ...sessionFromToken(renewed), user: current.user })
+        response = await fetch(authUrl('/logout'), {
+          method: 'POST', credentials: 'include',
+          headers: { Authorization: `Bearer ${renewed.access_token}` },
+        })
+      }
+      if (!response.ok) throw new Error('Server sign out failed. Please try again.')
+      clearPendingAuthorization()
+      setLogoutState('complete')
+      setSession(null)
+      setError(null)
+      return true
+    } catch (err) {
+      setError(errorMessage(err))
+      return false
+    } finally {
+      signingOutRef.current = false
+      setLogoutState((current) => current === 'complete' ? current : 'idle')
+    }
   }, [setSession])
 
   const hasScope = useCallback(
@@ -371,11 +364,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   useEffect(() => {
+    api.setTokenReader(() => sessionRef.current?.accessToken ?? null)
     api.setUnauthorizedHandler(async () => {
       const next = await refreshAccessToken()
       return next?.accessToken ?? null
     })
-    return () => api.setUnauthorizedHandler(null)
+    return () => {
+      api.setTokenReader(() => null)
+      api.setUnauthorizedHandler(null)
+    }
   }, [refreshAccessToken])
 
   useEffect(() => {
@@ -405,6 +402,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [refreshAccessToken])
 
+  const status: AuthStatus = session ? 'authenticated'
+    : logoutState === 'complete' ? 'signed-out'
+    : error ? 'error' : 'anonymous'
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
@@ -412,10 +412,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       error,
       login,
       logout,
+      signingOut,
       handleCallback,
       hasScope,
     }),
-    [status, session, error, login, logout, handleCallback, hasScope],
+    [status, session, error, login, logout, signingOut, handleCallback, hasScope],
   )
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>

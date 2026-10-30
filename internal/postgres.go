@@ -12,17 +12,18 @@ import (
 // DB is the global database handle (PostgreSQL)
 var DB *sqlx.DB
 
-func init() {
+func OpenDatabase() error {
 	// AuthServerConfig.DB expected format example:
 	// postgres://user:pass@host:5432/auth?sslmode=disable
 	db, err := sqlx.Connect("pgx", AuthServerConfig.DB)
 	if err != nil {
 		slog.Error("failed to connect to database", "err", err)
-		panic(err)
+		return err
 	}
 	DB = db
 
 	logConnectionInfo(AuthServerConfig.DB)
+	return nil
 }
 
 func logConnectionInfo(dsn string) {

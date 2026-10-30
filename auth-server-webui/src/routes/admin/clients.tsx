@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../../lib/api'
+import { useList } from '../../lib/use-list'
 import { ADMIN_CLIENT_ID } from '../../lib/config'
 import type { AuthClient } from '../../types'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
@@ -9,16 +10,14 @@ const GRANT_OPTIONS = [
   { value: 'authorization_code', label: 'Authorization code' },
   { value: 'refresh_token', label: 'Refresh token' },
   { value: 'client_credentials', label: 'Client credentials' },
-  { value: 'implicit', label: 'Implicit' },
 ]
 
 const DEFAULT_GRANTS = ['authorization_code', 'refresh_token']
 
+const loadItems = () => api.getClients()
+
 export default function ClientsPage() {
-  const [clients, setClients] = useState<AuthClient[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
+  const { data: clients, loading, error, setError, reload } = useList(loadItems)
 
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -30,36 +29,6 @@ export default function ClientsPage() {
   const [tokenType, setTokenType] = useState(1)
   const [secret, setSecret] = useState('')
   const [createdSecret, setCreatedSecret] = useState<string | null>(null)
-
-  useEffect(() => {
-    let active = true
-    api
-      .getClients()
-      .then((data) => {
-        if (active) {
-          setClients(data)
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          setError(errorMessage(err))
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false)
-        }
-      })
-    return () => {
-      active = false
-    }
-  }, [reloadKey])
-
-  const reload = () => {
-    setLoading(true)
-    setError(null)
-    setReloadKey((key) => key + 1)
-  }
 
   const resetForm = () => {
     setName('')

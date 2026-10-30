@@ -1,47 +1,17 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { api, errorMessage } from '../../lib/api'
 import type { AdminEntry } from '../../types'
+import { api, errorMessage } from '../../lib/api'
+import { useList } from '../../lib/use-list'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
 
+const loadItems = () => api.getAdmins()
+
 export default function AdminsPage() {
-  const [admins, setAdmins] = useState<AdminEntry[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
+  const { data: admins, loading, error, setError, reload } = useList(loadItems)
   const [userId, setUserId] = useState('')
   const [submitting, setSubmitting] = useState(false)
-
-  useEffect(() => {
-    let active = true
-    api
-      .getAdmins()
-      .then((data) => {
-        if (active) {
-          setAdmins(data)
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          setError(errorMessage(err))
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false)
-        }
-      })
-    return () => {
-      active = false
-    }
-  }, [reloadKey])
-
-  const reload = () => {
-    setLoading(true)
-    setError(null)
-    setReloadKey((key) => key + 1)
-  }
 
   const handleAdd = async (event: FormEvent) => {
     event.preventDefault()
@@ -81,7 +51,7 @@ export default function AdminsPage() {
       <PageHeader
         eyebrow="Governance"
         title="Administrators"
-        description="Grant or revoke management access. Membership is checked on every API request, so changes take effect immediately. Last-administrator protection is planned for Phase 3."
+        description="Grant or revoke management access. Membership is checked on every API request, so changes take effect immediately. The last administrator cannot be removed."
         actions={
           <Link to="/users" className="btn btn-outline">
             Browse users

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-oauth2/oauth2/v4"
@@ -61,5 +62,31 @@ func TestClientPolicyRejectsImplicitAndNonLoopbackHTTP(t *testing.T) {
 		if _, err := normalizeRedirectURIs([]string{uri}, ""); err != nil {
 			t.Errorf("safe redirect rejected: %s: %v", uri, err)
 		}
+	}
+}
+
+func TestRecentAuthenticationReusesRequestSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		when   any
+		status int
+	}{
+		{"recent", time.Now(), 204},
+		{"expired", time.Now().Add(-16 * time.Minute), 403},
+		{"missing", time.Time{}, 403},
+		{"invalid", "not a trusted authentication time", 403},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := gin.New()
+			r.Use(func(c *gin.Context) { c.Set("admin_auth_time", tc.when); c.Next() })
+			// The embedded nil Manager must never be called when a snapshot exists.
+			r.Use(RequireRecentAuthentication(nil))
+			r.POST("/resource", func(c *gin.Context) { c.Status(204) })
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest("POST", "/resource", nil))
+			if w.Code != tc.status {
+				t.Fatalf("status=%d want=%d", w.Code, tc.status)
+			}
+		})
 	}
 }

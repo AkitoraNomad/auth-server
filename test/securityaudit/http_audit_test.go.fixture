@@ -279,17 +279,27 @@ type fixtureTransport func(*http.Request) (*http.Response, error)
 
 func (f fixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-type loginUserRepo struct{ store.UserStore }
+type loginUserRepo struct {
+	store.UserStore
+	updates *int
+}
 
 func (loginUserRepo) GetUserByCredentials(string, *model.ProviderType, json.RawMessage, session.Store) (*model.User, error) {
 	return &model.User{ID: 42, Email: "fixture@example.invalid"}, nil
 }
 func (loginUserRepo) GetUserByID(id int64) (*model.User, error) { return &model.User{ID: id}, nil }
+func (r loginUserRepo) UpdateLastLogin(int64) error {
+	if r.updates != nil {
+		*r.updates++
+	}
+	return nil
+}
 
 func TestSuccessfulLoginRotatesSIDAndRejectsStaleLoginPage(t *testing.T) {
 	oldUser, oldRedis, oldTransport := store.UserRepo, internal.Rdb, turnstileClient.GetClient().Transport
 	defer func() { store.UserRepo = oldUser; internal.Rdb = oldRedis; turnstileClient.SetTransport(oldTransport) }()
-	store.UserRepo = loginUserRepo{}
+	updates := 0
+	store.UserRepo = loginUserRepo{updates: &updates}
 	internal.Rdb, _ = store.AuditRedisClient()
 	turnstileClient.SetTransport(fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"success":true}`))}, nil
@@ -359,6 +369,9 @@ func TestSuccessfulLoginRotatesSIDAndRejectsStaleLoginPage(t *testing.T) {
 	if rejected.Code != 409 {
 		t.Fatalf("stale login page returned %d", rejected.Code)
 	}
+	if updates != 1 {
+		t.Fatalf("last-login updates=%d, want one credential login", updates)
+	}
 }
 
 func TestIntrospectionHidesInactiveAndUnauthorizedTokens(t *testing.T) {
@@ -388,5 +401,22 @@ func TestForwardedIPIsAcceptedOnlyThroughConfiguredProxy(t *testing.T) {
 	request.RemoteAddr = "192.0.2.99:1234"
 	if getIp(request) != "192.0.2.99" {
 		t.Fatal("untrusted peer spoofed forwarded address")
+	}
+}
+
+func TestConsentReferrerPolicyPreservesSameOriginFormSubmission(t *testing.T) {
+	r := gin.New()
+	r.Use(securityHeadersMiddleware())
+	for _, path := range []string{"/auth", "/login", "/oauth2/authorize"} {
+		r.GET(path, func(c *gin.Context) { c.Status(204) })
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		expected := "no-referrer"
+		if path == "/auth" {
+			expected = "same-origin"
+		}
+		if w.Header().Get("Referrer-Policy") != expected {
+			t.Fatalf("%s: got %q want %q", path, w.Header().Get("Referrer-Policy"), expected)
+		}
 	}
 }

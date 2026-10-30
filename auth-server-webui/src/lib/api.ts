@@ -24,11 +24,11 @@ export class ApiError extends Error {
 type UnauthorizedHandler = () => Promise<string | null>
 
 class ApiClient {
-  private token: string | null = null
+  private getToken: () => string | null = () => null
   private onUnauthorized: UnauthorizedHandler | null = null
 
-  setToken(token: string | null) {
-    this.token = token
+  setTokenReader(reader: () => string | null) {
+    this.getToken = reader
   }
 
   setUnauthorizedHandler(handler: UnauthorizedHandler | null) {
@@ -41,16 +41,14 @@ class ApiClient {
     if (options.body && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
-    if (this.token) {
-      headers.set('Authorization', `Bearer ${this.token}`)
-    }
+    const token = this.getToken()
+    if (token) headers.set('Authorization', `Bearer ${token}`)
 
     const response = await fetch(apiUrl(path), { ...options, headers })
 
     if (response.status === 401 && !retried && this.onUnauthorized) {
       const nextToken = await this.onUnauthorized().catch(() => null)
       if (nextToken) {
-        this.token = nextToken
         return this.request<T>(path, options, true)
       }
     }
@@ -81,8 +79,10 @@ class ApiClient {
     return payload as T
   }
 
-  getMe(): Promise<MeResponse> {
-    return this.request<MeResponse>('/api/admin/me')
+  getMe(accessToken?: string): Promise<MeResponse> {
+    return this.request<MeResponse>('/api/admin/me', accessToken
+      ? { headers: { Authorization: `Bearer ${accessToken}` } }
+      : {})
   }
 
   // Users

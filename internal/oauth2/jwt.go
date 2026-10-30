@@ -7,18 +7,10 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"log/slog"
 )
 
-func init() {
-	err := LoadJWTConfig()
-	if err != nil {
-		slog.Error("failed to load JWT config", "err", err)
-		panic(err)
-	}
-}
-
 func LoadJWTConfig() error {
+	var keys []model.JWTKey
 	for _, keyConfig := range internal.AuthServerConfig.JWT {
 		switch keyConfig.Alg {
 		case "RS256":
@@ -26,13 +18,14 @@ func LoadJWTConfig() error {
 			if err != nil {
 				return err
 			}
-			JWTKeys = append(JWTKeys, &model.RSAKey{KeyID: keyConfig.Kid, PublicKey: publicKey, PrivateKey: privateKey})
+			keys = append(keys, &model.RSAKey{KeyID: keyConfig.Kid, PublicKey: publicKey, PrivateKey: privateKey})
 		case "HS512":
-			JWTKeys = append(JWTKeys, &model.HMACKey{KeyID: keyConfig.Kid, Secret: []byte(keyConfig.Sec)})
+			keys = append(keys, &model.HMACKey{KeyID: keyConfig.Kid, Secret: []byte(keyConfig.Sec)})
 		default:
 			return fmt.Errorf("unknown alg: %s", keyConfig.Alg)
 		}
 	}
+	JWTKeys = keys
 	return nil
 }
 

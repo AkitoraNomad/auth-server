@@ -1,3 +1,5 @@
+import { DashboardIcon, UsersIcon, ClientsIcon, AdminsIcon, SessionsIcon } from './components/NavigationIcons'
+import { ErrorAlert } from './components/Feedback'
 import { useEffect, useRef, type ReactNode } from 'react'
 import {
   Link,
@@ -16,101 +18,6 @@ import UsersPage from './routes/admin/users'
 import ClientsPage from './routes/admin/clients'
 import AdminsPage from './routes/admin/admins'
 import SessionsPage from './routes/admin/sessions'
-
-function DashboardIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[18px] w-[18px]"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <rect height="7" rx="2" width="7" x="3" y="3" />
-      <rect height="7" rx="2" width="7" x="14" y="3" />
-      <rect height="7" rx="2" width="7" x="3" y="14" />
-      <rect height="7" rx="2" width="7" x="14" y="14" />
-    </svg>
-  )
-}
-
-function UsersIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[18px] w-[18px]"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  )
-}
-
-function ClientsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[18px] w-[18px]"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <rect height="16" rx="3" width="18" x="3" y="4" />
-      <path d="M3 9h18" />
-      <path d="M7 6.5h.01M10 6.5h.01" />
-    </svg>
-  )
-}
-
-function AdminsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[18px] w-[18px]"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 3 19 6v5c0 4.5-2.9 7.7-7 10-4.1-2.3-7-5.5-7-10V6l7-3Z" />
-      <path d="m9 12 2 2 4-4" />
-    </svg>
-  )
-}
-
-function SessionsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-[18px] w-[18px]"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 2" />
-    </svg>
-  )
-}
 
 function Spinner({ label }: { label: string }) {
   return (
@@ -143,7 +50,7 @@ function RequireAuth() {
   if (status === 'authenticated') {
     return <Outlet />
   }
-  if (status === 'error') {
+  if (status === 'error' || status === 'signed-out') {
     return <Navigate to="/login" replace />
   }
   return <AutoLogin returnTo={location.pathname + location.search} />
@@ -245,7 +152,7 @@ function CallbackPage() {
 }
 
 function Forbidden({ required }: { required?: string }) {
-  const { logout } = useAuth()
+  const { logout, signingOut, error } = useAuth()
   const navigate = useNavigate()
 
   return (
@@ -281,15 +188,18 @@ function Forbidden({ required }: { required?: string }) {
               Required scope: <code className="badge badge-ghost badge-sm font-mono">{required}</code>
             </p>
           )}
+          {error && <ErrorAlert message={error} />}
           <div className="flex flex-wrap justify-center gap-2">
             <Link to="/" className="btn btn-primary btn-sm">
               Back to dashboard
             </Link>
             <button
               className="btn btn-ghost btn-sm"
+              disabled={signingOut}
               onClick={() => {
-                logout()
-                navigate('/login', { replace: true })
+                void logout().then((done) => {
+                  if (done) navigate('/login', { replace: true })
+                })
               }}
             >
               Sign out
@@ -337,7 +247,7 @@ function AnyScopeGate({ children }: { children: ReactNode }) {
 }
 
 export function AdminLayout() {
-  const { session, logout, hasScope } = useAuth()
+  const { session, logout, hasScope, signingOut, error } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -409,8 +319,9 @@ export function AdminLayout() {
   }
 
   const signOut = () => {
-    logout()
-    navigate('/login', { replace: true })
+    void logout().then((done) => {
+      if (done) navigate('/login', { replace: true })
+    })
   }
 
   const visibleNav = navItems.filter((item) => item.visible)
@@ -453,14 +364,15 @@ export function AdminLayout() {
             <span className="hidden max-w-[220px] truncate text-sm text-base-content/55 xl:inline">
               {email}
             </span>
-            <button className="btn btn-ghost btn-sm" onClick={signOut}>
-              Sign out
+            <button className="btn btn-ghost btn-sm" onClick={signOut} disabled={signingOut}>
+              {signingOut ? 'Signing out...' : 'Sign out'}
             </button>
           </div>
         </header>
 
         <main className="flex-1 p-4 md:p-6 lg:p-8">
           <div className="mx-auto w-full max-w-[1400px]">
+            {error && <ErrorAlert message={error} />}
             <Outlet />
           </div>
         </main>

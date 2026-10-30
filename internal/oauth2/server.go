@@ -7,7 +7,6 @@ import (
 	"auth-server/internal/util"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -62,7 +61,6 @@ func InitServer() *server.Server {
 	// preloads the old token and would bypass replay handling for scoped retries.
 	srv.SetUserAuthorizationHandler(userAuthorizeHandler)
 	srv.SetAuthorizeScopeHandler(scopeHandler)
-	srv.SetResponseTokenHandler(getResponseTokenHandler(boundManager))
 	srv.SetInternalErrorHandler(func(err error) (re *errors.Response) {
 		// go-oauth2 does not put ErrInvalidRedirectURI in its public
 		// descriptions map, which would otherwise turn a token request with a
@@ -180,54 +178,6 @@ func scopeHandler(w http.ResponseWriter, r *http.Request) (string, error) {
 		return "", errors.New("failed to get scope")
 	}
 	return strings.Join(names, " "), nil
-}
-
-func getResponseTokenHandler(manager oauth2.Manager) server.ResponseTokenHandler {
-	return func(w http.ResponseWriter, data map[string]interface{}, header http.Header, statusCode ...int) error {
-		t := data["access_token"]
-		if ts, ok := t.(string); ok {
-			ti, err := manager.LoadAccessToken(context.Background(), ts)
-			if err == nil {
-				userId := ti.GetUserID()
-				if userId != "" {
-					slog.Info("access token generated", "user_id", userId)
-					// update user last login time for user-bound tokens only
-					updateUserLastLogin(userId)
-				} else {
-					slog.Debug("client credentials access token generated")
-				}
-			} else {
-				slog.Warn("failed to load access token after gen token", "err", err)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Pragma", "no-cache")
-
-		for key := range header {
-			w.Header().Set(key, header.Get(key))
-		}
-
-		status := http.StatusOK
-		if len(statusCode) > 0 && statusCode[0] > 0 {
-			status = statusCode[0]
-		}
-
-		w.WriteHeader(status)
-		return json.NewEncoder(w).Encode(data)
-	}
-}
-
-func updateUserLastLogin(userId string) {
-	if uid, err := strconv.ParseInt(userId, 10, 64); err == nil {
-		if err := storeImpl.UserRepo.UpdateLastLogin(uid); err != nil {
-			slog.Error("failed to update user last login time", "err", err)
-		} else {
-			slog.Info("updated user last login time", "user_id", uid)
-		}
-	} else {
-		slog.Error("failed to parse user id", "user_id", userId, "err", err)
-	}
 }
 
 func sessionOptions() []session.Option {

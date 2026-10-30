@@ -1,3 +1,4 @@
+import { UsersIcon, ClientsIcon, AdminsIcon, SessionsIcon } from '../../components/NavigationIcons'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useAuth } from '../../lib/auth-context'
@@ -46,81 +47,6 @@ function formatExpiry(timestamp: number): string {
   })
 }
 
-function UsersIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-5 w-5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  )
-}
-
-function ClientsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-5 w-5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <rect height="16" rx="3" width="18" x="3" y="4" />
-      <path d="M3 9h18" />
-      <path d="M7 6.5h.01M10 6.5h.01" />
-    </svg>
-  )
-}
-
-function AdminsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-5 w-5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <path d="M12 3 19 6v5c0 4.5-2.9 7.7-7 10-4.1-2.3-7-5.5-7-10V6l7-3Z" />
-      <path d="m9 12 2 2 4-4" />
-    </svg>
-  )
-}
-
-function SessionsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-5 w-5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.8"
-      viewBox="0 0 24 24"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 2" />
-    </svg>
-  )
-}
-
 function ArrowIcon({ className = 'h-4 w-4' }: { className?: string }) {
   return (
     <svg
@@ -165,7 +91,7 @@ export default function Dashboard() {
       title: 'Users',
       description: 'Create and remove accounts, and inspect login activity.',
       scope: 'manage:system',
-      icon: <UsersIcon />,
+      icon: <UsersIcon className="h-5 w-5" />,
       tone: 'bg-primary/10 text-primary',
       cta: 'Open',
     },
@@ -174,7 +100,7 @@ export default function Dashboard() {
       title: 'OAuth2 clients',
       description: 'Register clients and manage redirect URIs, scopes and grants.',
       scope: 'manage:clients',
-      icon: <ClientsIcon />,
+      icon: <ClientsIcon className="h-5 w-5" />,
       tone: 'bg-secondary/10 text-secondary',
       cta: 'Open',
     },
@@ -183,7 +109,7 @@ export default function Dashboard() {
       title: 'Administrators',
       description: 'Grant or revoke access to this management console.',
       scope: 'manage:system',
-      icon: <AdminsIcon />,
+      icon: <AdminsIcon className="h-5 w-5" />,
       tone: 'bg-accent/10 text-accent',
       cta: 'Open',
     },
@@ -192,7 +118,7 @@ export default function Dashboard() {
       title: 'Sessions',
       description: 'Active session and token inventory for this server.',
       scope: 'manage:system',
-      icon: <SessionsIcon />,
+      icon: <SessionsIcon className="h-5 w-5" />,
       tone: 'bg-warning/10 text-warning',
       phase: 'Phase 4',
       cta: 'Review',

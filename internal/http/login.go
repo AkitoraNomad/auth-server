@@ -193,6 +193,9 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 1, err)
 		return
 	}
+	if err := storeImpl.UserRepo.UpdateLastLogin(userInfo.ID); err != nil {
+		slog.Warn("failed to update last login", "user_id", userInfo.ID, "err", err)
+	}
 	responseJson(c.Writer, 0, map[string]any{
 		"user":     sessionUser.User,
 		"next_url": nextURL,

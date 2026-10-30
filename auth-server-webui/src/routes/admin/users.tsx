@@ -1,49 +1,18 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../../lib/api'
-import type { User } from '../../types'
+import { useList } from '../../lib/use-list'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
 
+const loadItems = () => api.getUsers()
+
 export default function UsersPage() {
-  const [users, setUsers] = useState<User[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
+  const { data: users, loading, error, setError, reload } = useList(loadItems)
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [email, setEmail] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
-
-  useEffect(() => {
-    let active = true
-    api
-      .getUsers()
-      .then((data) => {
-        if (active) {
-          setUsers(data)
-        }
-      })
-      .catch((err: unknown) => {
-        if (active) {
-          setError(errorMessage(err))
-        }
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false)
-        }
-      })
-    return () => {
-      active = false
-    }
-  }, [reloadKey])
-
-  const reload = () => {
-    setLoading(true)
-    setError(null)
-    setReloadKey((key) => key + 1)
-  }
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault()
