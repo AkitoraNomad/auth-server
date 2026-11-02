@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	oauth "github.com/go-oauth2/oauth2/v4"
+	oautherrors "github.com/go-oauth2/oauth2/v4/errors"
 	"github.com/go-oauth2/oauth2/v4/manage"
 	"github.com/go-oauth2/oauth2/v4/models"
 	"github.com/go-oauth2/oauth2/v4/server"
@@ -62,7 +64,7 @@ func fixtureServer(t *testing.T) (*server.Server, *clientBoundManager, *model.Au
 	manager.MapClientStorage(clients)
 	manager.MapTokenStorage(store.AuditTokenStore())
 	manager.MapAccessGenerate(fixtureGenerator{})
-	bound := newClientBoundManager(manager, internal.Rdb)
+	bound := newClientBoundManager(manager, internal.Rdb, nil)
 	srv := server.NewServer(&server.Config{TokenType: "Bearer", AllowedResponseTypes: []oauth.ResponseType{oauth.Code}, AllowedGrantTypes: []oauth.GrantType{oauth.AuthorizationCode, oauth.ClientCredentials, oauth.Refreshing}, AllowedCodeChallengeMethods: []oauth.CodeChallengeMethod{oauth.CodeChallengeS256}, ForcePKCE: true}, bound)
 	srv.SetClientInfoHandler(clientInfoHandler)
 	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
@@ -84,6 +86,57 @@ func seedToken(t *testing.T, mgr *clientBoundManager, scope string) oauth.TokenI
 		t.Fatal(err)
 	}
 	return token
+}
+
+func TestScopePolicyChecksAuthorizationExchangeAndInheritedRefresh(t *testing.T) {
+	_, mgr, client := fixtureServer(t)
+	client.Scopes = model.TextArray{"profile", "manage:system"}
+	allowed := false
+	mgr.scopePolicy = func(_ context.Context, cli oauth.ClientInfo, userID, scope string) error {
+		if !model.HasScope(scope, model.ScopeManageSystem) {
+			return nil
+		}
+		if cli.GetID() != client.GetID() || userID != "42" || !allowed {
+			return oautherrors.ErrInvalidScope
+		}
+		return nil
+	}
+	verifier := strings.Repeat("v", 43)
+	digest := sha256.Sum256([]byte(verifier))
+	authorize := func() (oauth.TokenInfo, error) {
+		return mgr.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: client.GetID(), UserID: "42", RedirectURI: client.RedirectURIs[0], Scope: "manage:system", CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	}
+	if _, err := authorize(); !errors.Is(err, oautherrors.ErrInvalidScope) {
+		t.Fatalf("unauthorized code issuance: %v", err)
+	}
+	allowed = true
+	code, err := authorize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &oauth.TokenGenerateRequest{ClientID: client.GetID(), ClientSecret: client.Secret, Code: code.GetCode(), RedirectURI: client.RedirectURIs[0], CodeVerifier: verifier}
+	allowed = false
+	if _, err := mgr.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, request); !errors.Is(err, oautherrors.ErrInvalidScope) {
+		t.Fatalf("removed permission allowed exchange: %v", err)
+	}
+	allowed = true
+	token, err := mgr.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshRequest := &oauth.TokenGenerateRequest{ClientID: client.GetID(), ClientSecret: client.Secret, Refresh: token.GetRefresh()}
+	allowed = false
+	if _, err := mgr.RefreshAccessToken(context.Background(), refreshRequest); !errors.Is(err, oautherrors.ErrInvalidScope) {
+		t.Fatalf("inherited scope skipped policy: %v", err)
+	}
+	if _, err := mgr.GenerateAccessToken(context.Background(), oauth.ClientCredentials, &oauth.TokenGenerateRequest{ClientID: client.GetID(), ClientSecret: client.Secret, Scope: "manage:system"}); !errors.Is(err, oautherrors.ErrInvalidScope) {
+		t.Fatalf("client credentials skipped policy: %v", err)
+	}
+	seedToken(t, mgr, "profile")
+	allowed = true
+	if _, err := mgr.RefreshAccessToken(context.Background(), refreshRequest); err != nil {
+		t.Fatalf("rejected policy consumed refresh: %v", err)
+	}
 }
 func refresh(srv *server.Server, id, secret, token, scope string) *httptest.ResponseRecorder {
 	values := url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "refresh_token": {token}}

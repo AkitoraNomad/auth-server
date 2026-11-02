@@ -48,11 +48,24 @@ type authenticatedSecurityVersionKey struct{}
 
 type clientBoundManager struct {
 	oauth2.Manager
-	rdb *redis.Client
+	rdb         *redis.Client
+	scopePolicy ScopePolicy
 }
 
-func newClientBoundManager(manager oauth2.Manager, rdb *redis.Client) *clientBoundManager {
-	return &clientBoundManager{Manager: manager, rdb: rdb}
+type ScopePolicy func(context.Context, oauth2.ClientInfo, string, string) error
+
+func newClientBoundManager(manager oauth2.Manager, rdb *redis.Client, policy ScopePolicy) *clientBoundManager {
+	return &clientBoundManager{Manager: manager, rdb: rdb, scopePolicy: policy}
+}
+
+func (m *clientBoundManager) authorizeScopes(ctx context.Context, client oauth2.ClientInfo, userID, scope string) error {
+	if !scopeAllowed(client, scope) {
+		return oauth2errors.ErrInvalidScope
+	}
+	if m.scopePolicy != nil {
+		return m.scopePolicy(ctx, client, userID, scope)
+	}
+	return nil
 }
 
 func (m *clientBoundManager) GenerateAuthToken(ctx context.Context, rt oauth2.ResponseType, req *oauth2.TokenGenerateRequest) (oauth2.TokenInfo, error) {
@@ -92,6 +105,9 @@ func (m *clientBoundManager) GenerateAuthToken(ctx context.Context, rt oauth2.Re
 		if !ok || authTime.IsZero() {
 			return nil, oauth2errors.ErrInvalidGrant
 		}
+	}
+	if err := m.authorizeScopes(ctx, cli, req.UserID, req.Scope); err != nil {
+		return nil, err
 	}
 	ti, err := m.Manager.GenerateAuthToken(ctx, rt, req)
 	if err != nil {
@@ -142,8 +158,8 @@ func (m *clientBoundManager) GenerateAccessToken(ctx context.Context, gt oauth2.
 	default:
 		return nil, oauth2errors.ErrUnsupportedGrantType
 	}
-	if !scopeAllowed(cli, policy.Scope) {
-		return nil, oauth2errors.ErrInvalidScope
+	if err := m.authorizeScopes(ctx, cli, policy.UserID, policy.Scope); err != nil {
+		return nil, err
 	}
 	ti, err := m.Manager.GenerateAccessToken(ctx, gt, req)
 	if err != nil {
@@ -216,8 +232,8 @@ func (m *clientBoundManager) RefreshAccessToken(ctx context.Context, req *oauth2
 			}
 		}
 	}
-	if !scopeAllowed(cli, effective) {
-		return nil, oauth2errors.ErrInvalidScope
+	if err := m.authorizeScopes(ctx, cli, old.GetUserID(), effective); err != nil {
+		return nil, err
 	}
 	claimed, err := m.rdb.SetNX(ctx, refreshConsumedPrefix+req.Refresh, family, tokenFamilyTTL).Result()
 	if err != nil {

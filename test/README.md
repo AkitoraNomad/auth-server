@@ -14,7 +14,7 @@ pnpm --dir auth-server-webui build
 go build -tags embedspa -o /tmp/auth-server-embed-check .
 ```
 
-安全脚本通过临时 Go overlay 将 `.go.fixture` 加入实际生产包，不复制或重写生产源码，不加载真实配置，也不访问外部服务。它同时运行普通 Go 测试和 51 项顶层安全探针，详见 [securityaudit/README.md](securityaudit/README.md)。
+安全脚本通过临时 Go overlay 将 `.go.fixture` 加入实际生产包，不复制或重写生产源码，不加载真实配置，也不访问外部服务。它同时运行普通 Go 测试和 53 项顶层安全探针，详见 [securityaudit/README.md](securityaudit/README.md)。
 
 ## PostgreSQL、Redis 与浏览器
 
@@ -51,3 +51,5 @@ go test -tags integration -race -count=1 -v ./internal/http -run TestLive
 同一实时集成命令还会验证最新基础表结构、用户资料/启停/密码重置、客户端配置/启停/secret 重置、关联授权失效、管理客户端与最后可用管理员保护、分页查询及 SQL 错误脱敏。浏览器 [management.py](browser/management.py) 由主脚本自动调用，实际操作这些表单、确认弹窗、状态筛选及页码切换。详细结果见 [P3 报告](phase3-report-2026-10-30.md)。
 
 客户端空值回归包含真实 SQL NULL scopes 和空策略数组；API 验证其输出为 `[]`。浏览器另将旧后端响应中的三个集合字段改为 `null`，验证桌面与手机布局、编辑表单及旧 domain 回退正常，且不出现未捕获页面异常。
+
+`TestLiveInternalClientRegistrationAndScopePolicy` 验证内置客户端按 `internal_key` 注册、不覆盖普通客户端、重复启动保持安全版本，以及管理员资格移除后的授权码签发/兑换/刷新拒绝。此用例使用同一 `TestLive` 命令和测试服务配置。

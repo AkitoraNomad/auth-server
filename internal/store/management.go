@@ -146,10 +146,10 @@ func ResetUserPassword(ctx context.Context, id int64, providerData []byte) error
 
 func lockClient(ctx context.Context, tx *sqlx.Tx, id int64) (model.AuthClient, error) {
 	var client model.AuthClient
-	if id == internal.AuthServerConfig.Admin.ClientID {
+	err := tx.GetContext(ctx, &client, "SELECT * FROM auth_client WHERE id=$1 FOR UPDATE", id)
+	if err == nil && client.InternalKey != nil {
 		return client, ErrProtectedClient
 	}
-	err := tx.GetContext(ctx, &client, "SELECT * FROM auth_client WHERE id=$1 FOR UPDATE", id)
 	return client, err
 }
 func UpdateClient(ctx context.Context, client *model.AuthClient) error {

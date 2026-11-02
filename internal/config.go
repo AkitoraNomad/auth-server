@@ -10,7 +10,6 @@ import (
 	"os"
 	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -39,7 +38,7 @@ type Config struct {
 	Issuer string      `yaml:"issuer"`
 	JWT    []JWTConfig `yaml:"jwt"`
 	Admin  struct {
-		ClientID     int64    `yaml:"client-id"`
+		ClientID     int64    `yaml:"-"`
 		DisplayName  string   `yaml:"display-name"`
 		RedirectURIs []string `yaml:"redirect-uris"`
 		Scopes       []string `yaml:"scopes"`
@@ -121,9 +120,7 @@ func (cfg *Config) setDefaultValues() error {
 		}
 	}
 	cfg.setAdminDefaults()
-	if err := cfg.applyAdminEnvOverrides(); err != nil {
-		return err
-	}
+	cfg.applyAdminEnvOverrides()
 
 	if cfg.Cloudflare.Turnstile.Key == "" || cfg.Cloudflare.Turnstile.Secret == "" {
 		slog.Error("Cloudflare Turnstile is not configured")
@@ -139,11 +136,6 @@ func (cfg *Config) setAdminDefaults() {
 	}
 	if cfg.Issuer == "" {
 		cfg.Issuer = fmt.Sprintf("http://%s:%d", issuerHost, cfg.Port)
-	}
-	if cfg.Admin.ClientID == 0 {
-		// The administrator SPA has historically used the numeric client id 2.
-		// It remains a BIGINT (no string client key); the server owns this row.
-		cfg.Admin.ClientID = 2
 	}
 	if cfg.Admin.DisplayName == "" {
 		cfg.Admin.DisplayName = "Auth Server Admin"
@@ -164,17 +156,9 @@ func (cfg *Config) setAdminDefaults() {
 	}
 }
 
-func (cfg *Config) applyAdminEnvOverrides() error {
+func (cfg *Config) applyAdminEnvOverrides() {
 	if v := strings.TrimSpace(os.Getenv("OAUTH_ISSUER")); v != "" {
 		cfg.Issuer = strings.TrimRight(v, "/")
-	}
-	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_ID")); v != "" {
-		id, err := strconv.ParseInt(v, 10, 64)
-		if err != nil || id <= 0 {
-			slog.Error("invalid ADMIN_CLIENT_ID", "value", v)
-			return fmt.Errorf("ADMIN_CLIENT_ID must be a positive integer")
-		}
-		cfg.Admin.ClientID = id
 	}
 	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_DISPLAY_NAME")); v != "" {
 		cfg.Admin.DisplayName = v
@@ -188,7 +172,6 @@ func (cfg *Config) applyAdminEnvOverrides() error {
 	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_GRANT_TYPES")); v != "" {
 		cfg.Admin.GrantTypes = splitCSV(v)
 	}
-	return nil
 }
 
 func splitCSV(v string) []string {

@@ -251,10 +251,10 @@ func runPhase3Regression(t *testing.T, f *integrationFixture) {
 		request("PUT", "/api/admin/clients/"+clientID, clientBody, 400)
 		clientBody["is_public"] = false
 		protected := map[string]any{"display_name": "broken", "is_public": true, "token_type": 1, "redirect_uris": []string{"https://app.example.invalid/cb"}, "scopes": []string{"manage:system", "manage:clients"}, "grant_types": []string{"authorization_code", "refresh_token"}}
-		request("PUT", "/api/admin/clients/2", protected, 400)
-		request("PATCH", "/api/admin/clients/2/state", map[string]any{"is_disabled": true}, 400)
-		request("POST", "/api/admin/clients/2/secret", nil, 400)
-		request("DELETE", "/api/admin/clients/2", nil, 400)
+		request("PUT", "/api/admin/clients/"+f.clientID(), protected, 400)
+		request("PATCH", "/api/admin/clients/"+f.clientID()+"/state", map[string]any{"is_disabled": true}, 400)
+		request("POST", "/api/admin/clients/"+f.clientID()+"/secret", nil, 400)
+		request("DELETE", "/api/admin/clients/"+f.clientID(), nil, 400)
 		protected["display_name"] = "Phase3 public"
 		data := payload(request("POST", "/api/admin/clients", protected, 200))
 		publicID := strconv.FormatInt(int64(data["id"].(float64)), 10)

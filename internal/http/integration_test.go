@@ -173,7 +173,7 @@ func integrationServer(t *testing.T) *integrationFixture {
 	}
 	cfg.JWT = []internal.JWTConfig{{Kid: "integration", Alg: "RS256", Sec: string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))}}
 	cfg.Cloudflare.Turnstile.Key, cfg.Cloudflare.Turnstile.Secret = "fixture", "fixture"
-	cfg.Admin.ClientID, cfg.Admin.DisplayName = 2, "Regression admin"
+	cfg.Admin.DisplayName = "Regression admin"
 	cfg.Admin.RedirectURIs = []string{"http://localhost/admin-page/callback"}
 	cfg.Admin.Scopes, cfg.Admin.GrantTypes = []string{"manage:system", "manage:clients"}, []string{"authorization_code", "refresh_token"}
 	internal.AuthServerConfig = cfg
@@ -199,22 +199,25 @@ func integrationServer(t *testing.T) *integrationFixture {
 	if _, err := internal.DB.Exec("INSERT INTO auth_admin(user_id) VALUES($1)", user.ID); err != nil {
 		t.Fatal(err)
 	}
-	srv := authoauth.InitServer()
+	srv := authoauth.InitServer(store.ManagementScopePolicy)
 	return &integrationFixture{srv: srv, engine: CreateGinEngine(srv, os.DirFS("auth-server-webui/dist")), userID: user.ID, password: "Regression-password-123!", prefix: prefix, redisRaw: raw}
 }
 func (f *integrationFixture) token(t *testing.T, scopes string) oauth.TokenInfo {
 	t.Helper()
 	verifier := strings.Repeat("v", 43)
 	digest := sha256.Sum256([]byte(verifier))
-	code, err := f.srv.Manager.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: "2", UserID: strconv.FormatInt(f.userID, 10), RedirectURI: internal.AuthServerConfig.Admin.RedirectURIs[0], Scope: scopes, CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
+	code, err := f.srv.Manager.GenerateAuthToken(context.Background(), oauth.Code, &oauth.TokenGenerateRequest{ClientID: f.clientID(), UserID: strconv.FormatInt(f.userID, 10), RedirectURI: internal.AuthServerConfig.Admin.RedirectURIs[0], Scope: scopes, CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]), CodeChallengeMethod: oauth.CodeChallengeS256})
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := f.srv.Manager.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: "2", Code: code.GetCode(), RedirectURI: internal.AuthServerConfig.Admin.RedirectURIs[0], CodeVerifier: verifier})
+	token, err := f.srv.Manager.GenerateAccessToken(context.Background(), oauth.AuthorizationCode, &oauth.TokenGenerateRequest{ClientID: f.clientID(), Code: code.GetCode(), RedirectURI: internal.AuthServerConfig.Admin.RedirectURIs[0], CodeVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return token
+}
+func (f *integrationFixture) clientID() string {
+	return strconv.FormatInt(internal.AuthServerConfig.Admin.ClientID, 10)
 }
 func (f *integrationFixture) request(method, path, token string, body io.Reader) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, body)
@@ -283,7 +286,7 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 		if w := f.request("GET", "/api/admin/me", token.GetAccess(), nil); w.Code != 200 {
 			t.Fatalf("me: %d %s", w.Code, w.Body.String())
 		}
-		if w := f.request("DELETE", "/api/admin/clients/2", token.GetAccess(), nil); w.Code != 400 {
+		if w := f.request("DELETE", "/api/admin/clients/"+f.clientID(), token.GetAccess(), nil); w.Code != 400 {
 			t.Fatalf("management client delete: %d", w.Code)
 		}
 		limited := f.token(t, "manage:clients")
@@ -293,7 +296,7 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 	})
 	t.Run("RefreshRotationReplayAndTimestamp", func(t *testing.T) {
 		original := f.token(t, "manage:system")
-		next, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "2", Refresh: original.GetRefresh()})
+		next, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: f.clientID(), Refresh: original.GetRefresh()})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -303,7 +306,7 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 		if _, err := f.srv.Manager.LoadAccessToken(context.Background(), original.GetAccess()); err == nil {
 			t.Fatal("old access token survived rotation")
 		}
-		if _, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "2", Refresh: original.GetRefresh()}); err == nil {
+		if _, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: f.clientID(), Refresh: original.GetRefresh()}); err == nil {
 			t.Fatal("refresh replay accepted")
 		}
 		if _, err := f.srv.Manager.LoadAccessToken(context.Background(), next.GetAccess()); err == nil {
@@ -324,7 +327,7 @@ func TestLivePostgresRedisRegression(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				_, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: "2", Refresh: current.GetRefresh()})
+				_, err := f.srv.Manager.RefreshAccessToken(context.Background(), &oauth.TokenGenerateRequest{ClientID: f.clientID(), Refresh: current.GetRefresh()})
 				results <- err
 			}()
 		}

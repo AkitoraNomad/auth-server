@@ -25,7 +25,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := oauth2.InitServer()
+	srv := oauth2.InitServer(store.ManagementScopePolicy)
 	engine := oauth2Http.CreateGinEngine(srv, spaAssetsFS())
 	addr := fmt.Sprintf("%s:%d", internal.AuthServerConfig.Host, internal.AuthServerConfig.Port)
 	slog.Info("Server started.", "addr", addr)

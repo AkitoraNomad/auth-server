@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api, ApiError, errorMessage } from './api'
-import { ADMIN_CLIENT_ID, ADMIN_SCOPES, REDIRECT_URI, authUrl, safeReturnPath } from './config'
+import { getAdminClientID, ADMIN_SCOPES, REDIRECT_URI, authUrl, safeReturnPath } from './config'
 import {
   AuthContext,
   type AuthContextValue,
@@ -24,6 +24,7 @@ try {
 }
 
 interface PendingAuthorization {
+  clientID: string
   verifier: string
   state: string
   createdAt: number
@@ -57,6 +58,7 @@ function readPendingAuthorization(): PendingAuthorization | null {
     }
     const value = JSON.parse(raw) as Partial<PendingAuthorization>
     if (
+      typeof value.clientID !== 'string' || !/^[1-9]\d*$/.test(value.clientID) ||
       typeof value.verifier !== 'string' ||
       typeof value.state !== 'string' ||
       typeof value.createdAt !== 'number'
@@ -64,6 +66,7 @@ function readPendingAuthorization(): PendingAuthorization | null {
       return null
     }
     return {
+      clientID: value.clientID,
       verifier: value.verifier,
       state: value.state,
       createdAt: value.createdAt,
@@ -86,11 +89,12 @@ function scopesFromToken(value: string | undefined): string[] {
   return (value || '').split(/\s+/).filter(Boolean)
 }
 
-function sessionFromToken(token: TokenResponse): SessionState {
+function sessionFromToken(token: TokenResponse, clientID: string): SessionState {
   if (!token.access_token) {
     throw new Error('The token endpoint did not return an access token.')
   }
   return {
+    clientID,
     accessToken: token.access_token,
     refreshToken: token.refresh_token || null,
     expiresAt: Date.now() + Math.max(1, token.expires_in || 3600) * 1000,
@@ -160,10 +164,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           new URLSearchParams({
             grant_type: 'refresh_token',
             refresh_token: current.refreshToken as string,
-            client_id: ADMIN_CLIENT_ID,
+            client_id: current.clientID,
           }),
         )
-        const refreshed = sessionFromToken(token)
+        const refreshed = sessionFromToken(token, current.clientID)
         const next: SessionState = {
           ...refreshed,
           refreshToken: token.refresh_token || current.refreshToken,
@@ -191,10 +195,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback((returnTo?: string) => {
     setLogoutState('idle')
     const run = async () => {
+      const clientID = await getAdminClientID()
       const verifier = randomValue(32)
       const state = randomValue(24)
       const challenge = await codeChallenge(verifier)
       writePendingAuthorization({
+        clientID,
         verifier,
         state,
         createdAt: Date.now(),
@@ -202,7 +208,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
 
       const params = new URLSearchParams({
-        client_id: ADMIN_CLIENT_ID,
+        client_id: clientID,
         response_type: 'code',
         scope: ADMIN_SCOPES.join(' '),
         redirect_uri: REDIRECT_URI,
@@ -264,11 +270,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               grant_type: 'authorization_code',
               code,
               redirect_uri: REDIRECT_URI,
-              client_id: ADMIN_CLIENT_ID,
+              client_id: pending.clientID,
               code_verifier: pending.verifier,
             }),
           )
-          const initial = sessionFromToken(token)
+          const initial = sessionFromToken(token, pending.clientID)
 
           let me: MeResponse
           try {
@@ -334,10 +340,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // represents a grant that must be revoked before reporting success.
       if (response.status === 401 && current?.refreshToken) {
         const renewed = await postToken(new URLSearchParams({
-          grant_type: 'refresh_token', client_id: ADMIN_CLIENT_ID,
+          grant_type: 'refresh_token', client_id: current.clientID,
           refresh_token: current.refreshToken,
         }))
-        setSession({ ...sessionFromToken(renewed), user: current.user })
+        setSession({ ...sessionFromToken(renewed, current.clientID), user: current.user })
         response = await fetch(authUrl('/logout'), {
           method: 'POST', credentials: 'include',
           headers: { Authorization: `Bearer ${renewed.access_token}` },

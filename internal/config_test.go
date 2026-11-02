@@ -12,7 +12,7 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	t.Setenv("OAUTH_ISSUER", "https://auth.example.invalid/")
 	t.Setenv("CONFIG_TEST_SECRET", "fixture-secret")
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("cloudflare:\n  turnstile:\n    key: fixture\n    secret: ${CONFIG_TEST_SECRET}\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("admin:\n  client-id: 9\ncloudflare:\n  turnstile:\n    key: fixture\n    secret: ${CONFIG_TEST_SECRET}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	original := AuthServerConfig
@@ -20,7 +20,7 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Admin.ClientID != 9 || cfg.Issuer != "https://auth.example.invalid" || cfg.Port != 8080 || cfg.Redis.Port != "6379" || len(cfg.JWT) != 1 || cfg.JWT[0].Alg != "RS256" || cfg.Cloudflare.Turnstile.Secret != "fixture-secret" {
+	if cfg.Admin.ClientID != 0 || cfg.Issuer != "https://auth.example.invalid" || cfg.Port != 8080 || cfg.Redis.Port != "6379" || len(cfg.JWT) != 1 || cfg.JWT[0].Alg != "RS256" || cfg.Cloudflare.Turnstile.Secret != "fixture-secret" {
 		t.Fatalf("bad defaults/overrides: client=%d issuer=%q", cfg.Admin.ClientID, cfg.Issuer)
 	}
 	if AuthServerConfig.Port != original.Port || AuthServerConfig.Admin.ClientID != original.Admin.ClientID {

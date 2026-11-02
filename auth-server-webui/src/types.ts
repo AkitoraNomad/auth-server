@@ -7,6 +7,7 @@ export interface User {
 }
 
 export interface AuthClient {
+  internal_key: string | null
   is_disabled: boolean
   id: number
   display_name: string

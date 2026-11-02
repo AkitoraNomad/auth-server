@@ -289,10 +289,6 @@ func DeleteClientAPI() gin.HandlerFunc {
 			responseErr(c, http.StatusBadRequest, "invalid id")
 			return
 		}
-		if clientID == internal.AuthServerConfig.Admin.ClientID {
-			responseErr(c, http.StatusBadRequest, "the management client cannot be deleted")
-			return
-		}
 		if err := store.ClientRepo.(*store.DbClientStore).Delete(c.Request.Context(), id); err != nil {
 			storeError(c, err)
 			return

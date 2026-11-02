@@ -38,6 +38,9 @@ func (m *DbClientStore) GetByID(ctx context.Context, id string) (oauth2.ClientIn
 
 // Create inserts a new client and lets PostgreSQL allocate the BIGINT id.
 func (m *DbClientStore) Create(ctx context.Context, c *model.AuthClient) error {
+	if c.InternalKey != nil {
+		return ErrProtectedClient
+	}
 	now := time.Now()
 	c.CreatedAt = &now
 	c.UpdatedAt = &now
@@ -79,8 +82,16 @@ func (m *DbClientStore) Delete(ctx context.Context, id string) error {
 	if err != nil || clientID <= 0 {
 		return errors.New("invalid client id")
 	}
-	if clientID == internal.AuthServerConfig.Admin.ClientID {
-		return ErrProtectedClient
+	tx, err := internal.DB.BeginTxx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return requireAffected(internal.DB.ExecContext(ctx, "delete from auth_client where id = $1", clientID))
+	defer tx.Rollback()
+	if _, err := lockClient(ctx, tx, clientID); err != nil {
+		return err
+	}
+	if err := requireAffected(tx.ExecContext(ctx, "delete from auth_client where id = $1", clientID)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -2,6 +2,7 @@ import { createContext, useContext } from 'react'
 import type { User } from '../types'
 
 export interface SessionState {
+  clientID: string
   accessToken: string
   refreshToken: string | null
   expiresAt: number

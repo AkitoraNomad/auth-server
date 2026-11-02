@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { api, errorMessage } from '../../lib/api'
 import { useList } from '../../lib/use-list'
-import { ADMIN_CLIENT_ID } from '../../lib/config'
 import type { AuthClient, CreateClientPayload, ListQuery } from '../../types'
 import { EmptyState, ErrorAlert, LoadingBlock } from '../../components/Feedback'
 import { PageHeader } from '../../components/PageHeader'
@@ -50,7 +49,7 @@ export default function ClientsPage() {
     }, editing ? 'Client updated. Existing grants have been invalidated.' : 'Client registered.')
   }
   const actions = (client: AuthClient) => {
-    if (client.id === Number(ADMIN_CLIENT_ID)) return <span className="badge badge-primary badge-sm">Protected management client</span>
+    if (client.internal_key) return <span className="badge badge-primary badge-sm">Protected management client</span>
     return <div className="flex flex-wrap gap-1">
       <button className="btn btn-ghost btn-xs" disabled={busy} onClick={() => open(client)}>Edit</button>
       <button className="btn btn-ghost btn-xs" disabled={busy} onClick={() => {

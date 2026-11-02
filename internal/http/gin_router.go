@@ -45,6 +45,10 @@ func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	r.Use(sameOriginMiddleware())
 	r.Use(bodyLimitMiddleware())
 	r.Use(authRateMiddleware())
+	r.GET("/api/public/admin-config", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"client_id": fmt.Sprint(internal.AuthServerConfig.Admin.ClientID)})
+	})
 
 	// Root & static placeholder
 	r.GET("/", gin.WrapF(indexHandler))

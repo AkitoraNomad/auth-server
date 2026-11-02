@@ -2,7 +2,6 @@ import { UsersIcon, ClientsIcon, AdminsIcon, SessionsIcon } from '../../componen
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
 import { useAuth } from '../../lib/auth-context'
-import { ADMIN_CLIENT_ID } from '../../lib/config'
 
 type AreaCard = {
   to: string
@@ -172,7 +171,7 @@ export default function Dashboard() {
                 <span className="h-1.5 w-1.5 rounded-full bg-success-content" />
                 Session active
               </span>
-              <span className="badge badge-ghost badge-sm">Management client #{ADMIN_CLIENT_ID}</span>
+              <span className="badge badge-ghost badge-sm">Management client #{session?.clientID}</span>
             </div>
           </div>
 
@@ -317,7 +316,7 @@ export default function Dashboard() {
                   Management client
                 </dt>
                 <dd>
-                  #{ADMIN_CLIENT_ID} <span className="text-base-content/50">· public PKCE</span>
+                  #{session?.clientID} <span className="text-base-content/50">· public PKCE</span>
                 </dd>
               </div>
               <div className="flex flex-col gap-1 py-3 last:pb-0">

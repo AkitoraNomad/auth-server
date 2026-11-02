@@ -4,7 +4,6 @@ import (
 	"auth-server/internal"
 	"auth-server/internal/model"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
@@ -27,6 +26,7 @@ func IsAdmin(ctx context.Context, userID int64) (bool, error) {
 
 type adminClientSeed struct {
 	ID           int64           `db:"id"`
+	InternalKey  string          `db:"internal_key"`
 	DisplayName  string          `db:"display_name"`
 	Domain       string          `db:"domain"`
 	Scopes       model.TextArray `db:"scopes"`
@@ -41,7 +41,7 @@ type adminClientSeed struct {
 func EnsureAdminClient() error {
 	cfg := internal.AuthServerConfig.Admin
 
-	seed, err := buildAdminClientSeed(cfg.ClientID, cfg.DisplayName, cfg.RedirectURIs, cfg.Scopes, cfg.GrantTypes)
+	seed, err := buildAdminClientSeed(cfg.DisplayName, cfg.RedirectURIs, cfg.Scopes, cfg.GrantTypes)
 	if err != nil {
 		return err
 	}
@@ -50,29 +50,17 @@ func EnsureAdminClient() error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p)
-		}
-	}()
+	defer tx.Rollback()
 
-	var existingID int64
-	err = tx.Get(&existingID, `SELECT id FROM auth_client WHERE id = $1 FOR UPDATE`, seed.ID)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		_, err = tx.NamedExec(`INSERT INTO auth_client
-			(id, display_name, secret, domain, scopes, token_type, is_public, redirect_uris, grant_types, created_at, updated_at)
-			VALUES (:id, :display_name, '', :domain, :scopes, 'JWT', TRUE, :redirect_uris, :grant_types, now(), now())`, seed)
-		if err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("create admin client: %w", err)
-		}
-	case err != nil:
-		_ = tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO auth_client (internal_key) VALUES ($1) ON CONFLICT (internal_key) DO NOTHING`, seed.InternalKey)
+	if err != nil {
+		return fmt.Errorf("create admin client: %w", err)
+	}
+	err = tx.Get(&seed.ID, `SELECT id FROM auth_client WHERE internal_key = $1 FOR UPDATE`, seed.InternalKey)
+	if err != nil {
 		return fmt.Errorf("load admin client: %w", err)
-	default:
-		_, err = tx.NamedExec(`UPDATE auth_client SET
+	}
+	_, err = tx.NamedExec(`UPDATE auth_client SET
    security_version = security_version + CASE WHEN
     secret IS DISTINCT FROM '' OR is_disabled OR NOT is_public OR token_type IS DISTINCT FROM 'JWT'
     OR scopes IS DISTINCT FROM :scopes OR redirect_uris IS DISTINCT FROM :redirect_uris OR grant_types IS DISTINCT FROM :grant_types
@@ -87,30 +75,15 @@ func EnsureAdminClient() error {
 			redirect_uris = :redirect_uris,
 			grant_types = :grant_types,
 			updated_at = now()
-			WHERE id = :id`, seed)
-		if err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("update admin client: %w", err)
-		}
-		slog.Info("admin client updated", "client_id", seed.ID)
-	}
-
-	// The client id is explicit so existing installations and VITE_ADMIN_CLIENT_ID
-	// stay stable. Advance the identity sequence past it for future clients.
-	var sequenceValue int64
-	if err = tx.Get(&sequenceValue,
-		`SELECT setval(
-			pg_get_serial_sequence('auth.auth_client', 'id'),
-			GREATEST((SELECT COALESCE(MAX(id), 0) FROM auth_client), $1),
-			true
-		)`, seed.ID); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("advance auth_client id sequence: %w", err)
+			WHERE internal_key = :internal_key`, seed)
+	if err != nil {
+		return fmt.Errorf("update admin client: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	internal.AuthServerConfig.Admin.ClientID = seed.ID
 
 	slog.Info("admin client ensured",
 		"client_id", seed.ID,
@@ -121,10 +94,7 @@ func EnsureAdminClient() error {
 	return nil
 }
 
-func buildAdminClientSeed(clientID int64, displayName string, redirectURIs, scopes, grantTypes []string) (adminClientSeed, error) {
-	if clientID <= 0 {
-		return adminClientSeed{}, errors.New("admin.client-id must be a positive integer")
-	}
+func buildAdminClientSeed(displayName string, redirectURIs, scopes, grantTypes []string) (adminClientSeed, error) {
 	if strings.TrimSpace(displayName) == "" {
 		displayName = "Auth Server Admin"
 	}
@@ -190,7 +160,7 @@ func buildAdminClientSeed(clientID int64, displayName string, redirectURIs, scop
 	}
 
 	return adminClientSeed{
-		ID:          clientID,
+		InternalKey: model.AdminClientKey,
 		DisplayName: displayName,
 		// Redirect validation is exact and handled by the authorization
 		// handlers; leave the legacy domain empty for the admin client.

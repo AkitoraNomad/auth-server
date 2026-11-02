@@ -11,7 +11,15 @@ function normalizeBase(value: string | undefined): string {
 export const AUTH_BASE_URL = normalizeBase(import.meta.env.VITE_AUTH_BASE_URL) || window.location.origin
 export const API_BASE_URL = normalizeBase(import.meta.env.VITE_API_BASE_URL) || window.location.origin
 
-export const ADMIN_CLIENT_ID = (import.meta.env.VITE_ADMIN_CLIENT_ID || '2').trim()
+export async function getAdminClientID(): Promise<string> {
+  const response = await fetch(authUrl('/api/public/admin-config'), { cache: 'no-store' })
+  if (!response.ok) throw new Error('Unable to load management client configuration.')
+  const config = await response.json() as { client_id?: unknown }
+  if (typeof config.client_id !== 'string' || !/^[1-9]\d*$/.test(config.client_id)) {
+    throw new Error('Invalid management client configuration.')
+  }
+  return config.client_id
+}
 export const ADMIN_SCOPES = ['manage:system', 'manage:clients'] as const
 export type AdminScope = (typeof ADMIN_SCOPES)[number]
 

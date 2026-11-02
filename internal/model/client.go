@@ -20,6 +20,7 @@ type ScopedClientInfo interface {
 }
 
 type AuthClient struct {
+	InternalKey     *string    `db:"internal_key" json:"internal_key"`
 	IsDisabled      bool       `db:"is_disabled" json:"is_disabled"`
 	SecurityVersion int64      `db:"security_version" json:"-"`
 	ID              int64      `db:"id" json:"id"`
@@ -32,6 +33,12 @@ type AuthClient struct {
 	RedirectURIs    TextArray  `db:"redirect_uris" json:"redirect_uris"`
 	GrantTypes      TextArray  `db:"grant_types" json:"grant_types"`
 	BaseModel
+}
+
+const AdminClientKey = "auth-server-admin-spa"
+
+func (c *AuthClient) IsAdminClient() bool {
+	return c.InternalKey != nil && *c.InternalKey == AdminClientKey
 }
 
 func (c *AuthClient) GetID() string {

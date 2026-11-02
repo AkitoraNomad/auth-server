@@ -61,10 +61,6 @@
       "type": "object",
       "description": "First-party management client. The server owns and idempotently updates this row on startup.",
       "properties": {
-        "client-id": {
-          "type": "integer",
-          "description": "Fixed BIGINT auth_client id (default 2). Must match VITE_ADMIN_CLIENT_ID."
-        },
         "display-name": { "type": "string" },
         "redirect-uris": {
           "type": "array",
@@ -74,7 +70,7 @@
         "scopes": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Management scopes allowed for the client; must include at least one manage:* scope."
+          "description": "Management scopes allowed for the client; must include manage:system and manage:clients."
         },
         "grant-types": {
           "type": "array",

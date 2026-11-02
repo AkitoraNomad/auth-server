@@ -21,7 +21,7 @@ import (
 	"github.com/go-session/session/v3"
 )
 
-func InitServer() *server.Server {
+func InitServer(policy ScopePolicy) *server.Server {
 	manager := manage.NewDefaultManager()
 
 	// manage.DefaultAuthorizeCodeTokenCfg
@@ -51,7 +51,7 @@ func InitServer() *server.Server {
 		},
 		ForcePKCE: true,
 	}
-	boundManager := newClientBoundManager(manager, internal.Rdb)
+	boundManager := newClientBoundManager(manager, internal.Rdb, policy)
 	srv := server.NewServer(&oauth2ServerConfig, boundManager)
 	srv.SetClientInfoHandler(clientInfoHandler)
 	srv.SetClientAuthorizedHandler(clientAuthorizedHandler)
