@@ -61,7 +61,7 @@ func InitServer(policy ScopePolicy) *server.Server {
 	// preloads the old token and would bypass replay handling for scoped retries.
 	srv.SetUserAuthorizationHandler(userAuthorizeHandler)
 	srv.SetAuthorizeScopeHandler(scopeHandler)
-	srv.SetInternalErrorHandler(func(err error) (re *errors.Response) {
+	srv.SetInternalErrorHandler(func(ctx context.Context, err error) (re *errors.Response) {
 		// go-oauth2 does not put ErrInvalidRedirectURI in its public
 		// descriptions map, which would otherwise turn a token request with a
 		// mismatched redirect_uri into an opaque 500 server_error.
@@ -72,17 +72,17 @@ func InitServer(policy ScopePolicy) *server.Server {
 				StatusCode:  http.StatusBadRequest,
 			}
 		}
-		slog.Error("Internal Error", "err", err)
+		slog.ErrorContext(ctx, "Internal Error", "err", err)
 		return
 	})
-	srv.SetResponseErrorHandler(func(re *errors.Response) {
-		slog.Error("Response Error", "err", re.Error.Error())
+	srv.SetResponseErrorHandler(func(ctx context.Context, re *errors.Response) {
+		slog.ErrorContext(ctx, "Response Error", "err", re.Error.Error())
 	})
 	srv.SetPreRedirectErrorHandler(preRedirectErrorHandler)
 	return srv
 }
 
-func preRedirectErrorHandler(w http.ResponseWriter, req *server.AuthorizeRequest, err error) error {
+func preRedirectErrorHandler(ctx context.Context, w http.ResponseWriter, req *server.AuthorizeRequest, err error) error {
 	w.Header().Set("Content-Type", "text/plain;charset=UTF-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -91,12 +91,12 @@ func preRedirectErrorHandler(w http.ResponseWriter, req *server.AuthorizeRequest
 	if req == nil {
 		msg := "Error: invalid_request\nDescription: " + err.Error() + "\n"
 		msg += "Hint: check that response_type, client_id, and redirect_uri are present and valid.\n"
-		slog.Error("Authorization PreRedirect Error (req is nil)", "err", err)
+		slog.ErrorContext(ctx, "Authorization PreRedirect Error (req is nil)", "err", err)
 		_, _ = w.Write([]byte(msg))
 		return nil
 	}
 
-	slog.Error("Authorization PreRedirect Error",
+	slog.ErrorContext(ctx, "Authorization PreRedirect Error",
 		"client_id", req.ClientID,
 		"response_type", string(req.ResponseType),
 		"redirect_uri", req.RedirectURI,

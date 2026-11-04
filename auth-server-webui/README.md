@@ -25,7 +25,9 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-需要 Node.js 22.12+ 和 pnpm 11.3.0。打开 `http://localhost:5173/admin-page/`。后端设置 `OAUTH_ISSUER=http://localhost:5173`，使同源校验与浏览器 origin 一致；使用 `127.0.0.1` 时也应同步修改 issuer。需要后端、PostgreSQL、Redis 和 Turnstile 配置；完整初始化及首位管理员步骤见 [运行指南](../docs/SETUP.md)。
+需要 Node.js 24.16+（24.x）和 pnpm 12.16.1。打开 `http://localhost:5173/admin-page/`。后端设置 `OAUTH_ISSUER=http://localhost:5173`，使同源校验与浏览器 origin 一致；使用 `127.0.0.1` 时也应同步修改 issuer。需要后端、PostgreSQL、Redis 和 Turnstile 配置；完整初始化及首位管理员步骤见 [运行指南](../docs/SETUP.md)。
+
+TypeScript 使用 6.0.x，以满足 typescript-eslint 当前 `<6.1.0` 的兼容要求。
 
 开发端口固定为 5173，以便回调 URL 与后端精确匹配。若修改端口，需要同步修改后端 `OAUTH_ISSUER`、`ADMIN_CLIENT_REDIRECT_URIS` 和前端显式设置的回调覆盖值。
 

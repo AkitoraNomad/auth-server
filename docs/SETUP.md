@@ -2,8 +2,8 @@
 
 ## 环境
 
-- Go 1.26+、PostgreSQL、Redis、`psql`。
-- Node.js 22.12+、pnpm 11.3.0。
+- Go 1.27.3+、PostgreSQL、Redis、`psql`。
+- Node.js 24.16+（24.x）、pnpm 12.16.1。
 - Turnstile site key / secret；Telegram 登录另需 bot 配置。
 
 ## 配置

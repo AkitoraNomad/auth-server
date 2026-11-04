@@ -1,0 +1,3 @@
+# ESLint still requests minimatch 10; remove when upstream requires a fixed version.
+overrides:
+  'minimatch@<11.0.1': '11.0.1'
