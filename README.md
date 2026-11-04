@@ -37,7 +37,7 @@ flowchart LR
 
 ## 快速开始
 
-需要 Go 1.26+、Node.js 22.12+、pnpm 11.3.0、PostgreSQL、Redis 和 Turnstile 配置。
+需要 Go 1.27.3+、Node.js 24.16+（24.x）、pnpm 12.16.1、PostgreSQL、Redis 和 Turnstile 配置。
 
 先按 [运行指南](docs/SETUP.md) 创建 `config.yaml`、初始化数据库并创建首位管理员，然后从项目根目录启动后端：
 
