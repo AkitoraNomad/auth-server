@@ -1,0 +1,8 @@
+.git
+.github
+auth-server-webui/node_modules
+auth-server-webui/dist
+auth-server-webui/.env
+config.yaml
+.env
+*.test

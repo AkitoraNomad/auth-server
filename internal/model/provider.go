@@ -1,7 +1,7 @@
 package model
 
 import (
-	"auth-server/internal/util"
+	"auth-server/internal/password"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -95,5 +95,5 @@ type EmailPasswordProviderData struct {
 }
 
 func (p *EmailPasswordProviderData) Validate(data string) bool {
-	return util.DigestSHA256Hex(data) == p.Password
+	return password.Verify(p.Password, data)
 }

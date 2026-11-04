@@ -2,80 +2,36 @@ package model
 
 import (
 	"database/sql/driver"
-	"fmt"
-	"strings"
+	"encoding/json"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type TextArray []string
 
-// Value implements driver.Valuer converting Go []string to PostgreSQL text[] literal
-func (j TextArray) Value() (driver.Value, error) {
-	if j == nil {
-		return "{}", nil
+// Keep collection fields stable in JSON, including values read from SQL NULL.
+func (a TextArray) MarshalJSON() ([]byte, error) {
+	if a == nil {
+		return []byte("[]"), nil
 	}
-	parts := make([]string, 0, len(j))
-	for _, s := range j {
-		esc := strings.ReplaceAll(s, `\\`, `\\\\`)
-		esc = strings.ReplaceAll(esc, `"`, `\\"`)
-		parts = append(parts, `"`+esc+`"`)
-	}
-	return "{" + strings.Join(parts, ",") + "}", nil
+	return json.Marshal([]string(a))
 }
 
-// Scan implements sql.Scanner parsing PostgreSQL text[] into []string
-func (j *TextArray) Scan(value interface{}) error {
-	if value == nil {
-		*j = nil
-		return nil
+func (a TextArray) Value() (driver.Value, error) {
+	if a == nil {
+		return "{}", nil
 	}
-	s, ok := value.(string)
-	if !ok {
-		b, ok2 := value.([]byte)
-		if !ok2 {
-			return fmt.Errorf("cannot convert %T to TextArray", value)
-		}
-		s = string(b)
+	encoded, err := pgtype.NewMap().Encode(pgtype.TextArrayOID, pgtype.TextFormatCode, []string(a), nil)
+	if err != nil {
+		return nil, err
 	}
-	s = strings.TrimSpace(s)
-	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
-		return fmt.Errorf("invalid PostgreSQL array format: %s", s)
+	return string(encoded), nil
+}
+
+func (a *TextArray) Scan(value any) error {
+	var values []string
+	if err := pgtype.NewMap().SQLScanner(&values).Scan(value); err != nil {
+		return err
 	}
-	inner := s[1 : len(s)-1]
-	if inner == "" {
-		*j = []string{}
-		return nil
-	}
-	// Simple split by comma; handles quoted elements with escaped quotes
-	var elems []string
-	cur := ""
-	inQuotes := false
-	for i := 0; i < len(inner); i++ {
-		c := inner[i]
-		if c == '"' {
-			if inQuotes && i+1 < len(inner) && inner[i+1] == '"' { // escaped quote
-				cur += "\""
-				i++
-				continue
-			}
-			inQuotes = !inQuotes
-			continue
-		}
-		if c == ',' && !inQuotes {
-			elems = append(elems, cur)
-			cur = ""
-			continue
-		}
-		cur += string(c)
-	}
-	if cur != "" {
-		elems = append(elems, cur)
-	}
-	// Unescape
-	for i, e := range elems {
-		e = strings.ReplaceAll(e, `\\\"`, `"`)
-		e = strings.ReplaceAll(e, `\\\\`, `\\`)
-		elems[i] = e
-	}
-	*j = TextArray(elems)
+	*a = TextArray(values)
 	return nil
 }

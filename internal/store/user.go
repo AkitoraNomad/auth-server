@@ -4,10 +4,13 @@ import (
 	"auth-server/internal"
 	"auth-server/internal/model"
 	"auth-server/internal/util"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-session/session/v3"
@@ -30,19 +33,7 @@ func (m *DbUserStore) GetUserByID(id int64) (*model.User, error) {
 	if err := internal.DB.Get(&authUser, "select * from auth_user where id = $1", id); err != nil {
 		return nil, err
 	}
-	var roles []model.AuthRole
-	query := `SELECT r.id, r.name, r.description
-			  FROM auth_role r
-			  JOIN auth_user_role ur ON r.id = ur.role_id
-			  WHERE ur.user_id = $1`
-	if err := internal.DB.Select(&roles, query, authUser.ID); err != nil {
-		return nil, err
-	}
-	roleList := make([]*model.Role, 0, len(roles))
-	for _, r := range roles {
-		roleList = append(roleList, model.NewRoleFromAuth(r))
-	}
-	user := model.NewUserFromAuth(authUser, roleList, authUser.LastLoginAt)
+	user := model.NewUserFromAuth(authUser, authUser.LastLoginAt)
 	return &user, nil
 }
 
@@ -52,12 +43,66 @@ func (m *DbUserStore) GetUserByCredentials(
 	data json.RawMessage,
 	sessionStore session.Store,
 ) (*model.User, error) {
-	var providers []model.AuthUserProvider
-	if err := internal.DB.Select(&providers, `select * from auth_user_provider where login_key = $1 and provider_type = $2`, loginKey, providerType); err != nil {
+	if providerType == nil {
+		return nil, errors.New("provider type required")
+	}
+
+	var verifiedTelegram *util.TelegramAuth
+	if *providerType == model.ProviderTelegram {
+		if internal.AuthServerConfig.Telegram.BotToken == "" {
+			return nil, errors.New("telegram login is disabled")
+		}
+		// The selected local account must be derived from the signed Telegram
+		// identity, never solely from a client-supplied login_key.
+		tg, err := util.ParseTelegramCredential(
+			data,
+			util.DigestSHA256(internal.AuthServerConfig.Telegram.BotToken),
+			time.Now(),
+		)
+		if err != nil {
+			slog.Warn("invalid telegram credential", "err", err)
+			return nil, errors.New("invalid_credentials")
+		}
+		verifiedKey := strconv.FormatInt(tg.ID, 10)
+		if loginKey != verifiedKey {
+			slog.Warn("telegram identity does not match login key")
+			return nil, errors.New("invalid_credentials")
+		}
+		verifiedTelegram = tg
+		loginKey = verifiedKey
+		// A correctly signed widget response is still a bearer credential.
+		// Consume it once across instances, for the entire acceptance window.
+		if internal.Rdb == nil {
+			return nil, errors.New("credential replay store unavailable")
+		}
+		canonical, err := json.Marshal(tg)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(canonical)
+		accepted, err := internal.Rdb.SetNX(sessionStore.Context(), fmt.Sprintf("auth:telegram:%x", digest), "1", 6*time.Minute).Result()
+		if err != nil || !accepted {
+			return nil, errors.New("invalid_credentials")
+		}
+	}
+
+	var providers []struct {
+		model.AuthUserProvider
+		UserSecurityVersion int64 `db:"user_security_version"`
+	}
+	query := `select p.*,u.security_version as user_security_version from auth_user_provider p join auth_user u on u.id=p.user_id where p.login_key = $1 and p.provider_type = $2`
+	if *providerType == model.ProviderEmailPassword {
+		loginKey = strings.ToLower(strings.TrimSpace(loginKey))
+		query = `select p.*,u.security_version as user_security_version from auth_user_provider p join auth_user u on u.id=p.user_id where lower(p.login_key) = $1 and p.provider_type = $2`
+	}
+	if err := internal.DB.Select(&providers, query, loginKey, providerType); err != nil {
 		return nil, err
 	}
-	if len(providers) <= 0 {
+	if len(providers) == 0 {
 		return nil, nil
+	}
+	if len(providers) != 1 {
+		return nil, errors.New("ambiguous identity")
 	}
 	provider := providers[0]
 	switch *provider.ProviderType {
@@ -71,24 +116,26 @@ func (m *DbUserStore) GetUserByCredentials(
 			return nil, err
 		}
 		if repo.Validate(req.Password) {
-			u, err := m.GetUserByID(provider.UserID)
-			return u, err
-		} else {
-			return nil, errors.New("invalid_credentials")
+			return m.loginUser(provider.UserID, provider.UserSecurityVersion)
 		}
+		return nil, errors.New("invalid_credentials")
 	case model.ProviderTelegram:
-		botTokenDigest := util.DigestSHA256(internal.AuthServerConfig.Telegram.BotToken)
-		if !util.ValidateTelegramCredential(data, botTokenDigest) {
-			slog.Warn("Invalid Telegram Credentials")
+		if verifiedTelegram == nil {
 			return nil, errors.New("invalid_credentials")
 		}
-		tgUser := model.TelegramUser{}
-		_ = json.Unmarshal(data, &tgUser)
+		tgUser := model.TelegramUser{
+			Id:        verifiedTelegram.ID,
+			FirstName: verifiedTelegram.FirstName,
+			LastName:  verifiedTelegram.LastName,
+			Username:  verifiedTelegram.Username,
+			PhotoUrl:  verifiedTelegram.PhotoURL,
+			AuthDate:  verifiedTelegram.AuthDate,
+		}
 		sessionStore.Set(internal.SessionKeyTelegramData, tgUser)
 		if err := sessionStore.Save(); err != nil {
 			return nil, err
 		}
-		return m.GetUserByID(provider.UserID)
+		return m.loginUser(provider.UserID, provider.UserSecurityVersion)
 	default:
 		return nil, fmt.Errorf("unknown ProviderType: %v", providerType)
 	}
@@ -111,20 +158,10 @@ func (m *DbUserStore) AddUser(user *model.User, provider model.AuthUserProvider)
 		return err
 	}
 
-	// Defer a rollback in case anything fails
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p) // re-throw panic after Rollback
-		} else if err != nil {
-			_ = tx.Rollback() // err is non-nil; don't change it
-		} else {
-			_ = tx.Commit() // err is nil; if Commit returns error update err
-		}
-	}()
+	defer tx.Rollback()
 
 	var uCount = 0
-	if err = tx.Get(&uCount, "SELECT COUNT(*) FROM auth_user WHERE email = $1", user.Email); err != nil {
+	if err = tx.Get(&uCount, "SELECT COUNT(*) FROM auth_user WHERE lower(email) = lower($1)", user.Email); err != nil {
 		return err
 	}
 
@@ -139,12 +176,16 @@ func (m *DbUserStore) AddUser(user *model.User, provider model.AuthUserProvider)
 		return err
 	}
 	var userID int64
-	if rows.Next() {
-		if err = rows.Scan(&userID); err != nil {
-			return err
-		}
+	if !rows.Next() {
+		_ = rows.Close()
+		return errors.New("create user returned no id")
+	}
+	if err = rows.Scan(&userID); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	_ = rows.Close()
+	user.ID = userID
 
 	// Insert provider data
 	provider.UserID = userID
@@ -161,7 +202,7 @@ func (m *DbUserStore) AddUser(user *model.User, provider model.AuthUserProvider)
 		return err
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 func (m *DbUserStore) UpdateLastLogin(userID int64) error {
@@ -170,51 +211,32 @@ func (m *DbUserStore) UpdateLastLogin(userID int64) error {
 	return err
 }
 
-func (m *DbUserStore) List() ([]model.User, error) {
-	var authUsers []model.AuthUser
-	if err := internal.DB.Select(&authUsers, "select * from auth_user order by id desc"); err != nil {
-		return nil, err
-	}
-	users := make([]model.User, 0, len(authUsers))
-	for _, au := range authUsers {
-		var roles []model.AuthRole
-		query := `SELECT r.id, r.name, r.description
-			  FROM auth_role r
-			  JOIN auth_user_role ur ON r.id = ur.role_id
-			  WHERE ur.user_id = $1`
-		_ = internal.DB.Select(&roles, query, au.ID)
-
-		roleList := make([]*model.Role, 0, len(roles))
-		for _, r := range roles {
-			roleList = append(roleList, model.NewRoleFromAuth(r))
-		}
-
-		users = append(users, model.NewUserFromAuth(au, roleList, au.LastLoginAt))
-	}
-	return users, nil
-}
-
 func (m *DbUserStore) Delete(id int64) error {
 	tx, err := internal.DB.Beginx()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			_ = tx.Commit()
-		}
-	}()
+	defer tx.Rollback()
+	if err := protectLastAdmin(tx, id); err != nil {
+		return err
+	}
 
 	if _, err = tx.Exec("DELETE FROM auth_user_provider WHERE user_id = $1", id); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("DELETE FROM auth_user_role WHERE user_id = $1", id); err != nil {
+	if err = requireAffected(tx.Exec("DELETE FROM auth_user WHERE id = $1", id)); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("DELETE FROM auth_user WHERE id = $1", id); err != nil {
-		return err
+	return tx.Commit()
+}
+
+func (m *DbUserStore) loginUser(id int64, securityVersion int64) (*model.User, error) {
+	user, err := m.GetUserByID(id)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	if user.IsDisabled || user.SecurityVersion != securityVersion {
+		return nil, errors.New("invalid_credentials")
+	}
+	return user, nil
 }

@@ -1,7 +1,7 @@
 {{define "head_common"}}
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.0/css/bulma.min.css">
+<link rel="stylesheet" href="/assets/bulma.min.css">
 <style>
   html,
   body {
@@ -39,12 +39,6 @@
     </a>
   </div>
   <div id="navMenu" class="navbar-menu">
-    <div class="navbar-start">
-      {{if .ShowAdminNav}}
-      <a class="navbar-item" href="/admin/client">Clients</a>
-      <a class="navbar-item" href="/admin/accounts">Accounts</a>
-      {{end}}
-    </div>
   </div>
 </nav>
 <script>

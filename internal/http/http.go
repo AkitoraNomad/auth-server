@@ -2,6 +2,7 @@ package http
 
 import (
 	"auth-server/internal"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,8 +18,10 @@ type TurnstileResp struct {
 	Hostname    string    `json:"hostname"`
 }
 
-func verifyRequest(token, ip string) error {
-	response, err := resty.New().R().SetFormData(map[string]string{
+var turnstileClient = resty.New().SetTimeout(10 * time.Second)
+
+func verifyRequest(ctx context.Context, token, ip string) error {
+	response, err := turnstileClient.R().SetContext(ctx).SetFormData(map[string]string{
 		"secret":   internal.AuthServerConfig.Cloudflare.Turnstile.Secret,
 		"response": token,
 		"remoteip": ip,

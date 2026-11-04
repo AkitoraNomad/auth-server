@@ -11,13 +11,6 @@ func Test1(t *testing.T) {
 	j := `
 	{
     "user": {
-      "roles": [
-        {
-          "id": 1,
-          "name": "admin",
-          "description": ""
-        }
-      ],
       "id": 2,
       "email": "test@example.com",
       "display_name": "Test User"

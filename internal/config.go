@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -24,16 +24,27 @@ type JWTConfig struct {
 }
 
 type Config struct {
-	Host  string `yaml:"host"`
-	Port  int    `yaml:"port"`
-	Redis struct {
-		Host string `yaml:"host"`
-		Port string `yaml:"port"`
+	TrustedProxies []string `yaml:"trusted-proxies"`
+	Host           string   `yaml:"host"`
+	Port           int      `yaml:"port"`
+	Redis          struct {
+		Host     string `yaml:"host"`
+		Port     string `yaml:"port"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+		TLS      bool   `yaml:"tls"`
 	} `yaml:"redis"`
-	DB           string      `yaml:"db"`
-	DBSearchPath string      `yaml:"db-search-path"`
-	JWT          []JWTConfig `yaml:"jwt"`
-	Cloudflare   struct {
+	DB     string      `yaml:"db"`
+	Issuer string      `yaml:"issuer"`
+	JWT    []JWTConfig `yaml:"jwt"`
+	Admin  struct {
+		ClientID     int64    `yaml:"-"`
+		DisplayName  string   `yaml:"display-name"`
+		RedirectURIs []string `yaml:"redirect-uris"`
+		Scopes       []string `yaml:"scopes"`
+		GrantTypes   []string `yaml:"grant-types"`
+	} `yaml:"admin"`
+	Cloudflare struct {
 		Turnstile struct {
 			Key    string `yaml:"key"`
 			Secret string `yaml:"secret"`
@@ -45,66 +56,62 @@ type Config struct {
 	} `yaml:"telegram"`
 }
 
-func init() {
-	configPath, err := filepath.Abs("config.yaml")
+// LoadConfig reads and validates configuration without opening external services.
+func LoadConfig(path string) (Config, error) {
+	var cfg Config
+	data, err := os.ReadFile(path)
 	if err != nil {
-		slog.Warn("failed to get absolute path of config file", "err", err)
-		return
+		return cfg, fmt.Errorf("read config: %w", err)
 	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		slog.Warn("failed to read config file or file not found", "path", configPath, "err", err)
-		return
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse config: %w", err)
 	}
-
-	if err = yaml.Unmarshal(data, &AuthServerConfig); err != nil {
-		slog.Error("failed to unmarshal config", "path", configPath, "err", err)
-		return
+	if err := resolveEnv(&cfg); err != nil {
+		return cfg, err
 	}
-
-	slog.Info("successfully loaded config file", "path", configPath)
-
-	resolveEnv(&AuthServerConfig)
-	setDefaultValues()
+	if err := cfg.setDefaultValues(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
-func setDefaultValues() {
-	if AuthServerConfig.Host == "" {
-		AuthServerConfig.Host = "localhost"
-		slog.Debug("set default listening host", "address", AuthServerConfig.Host)
+func (cfg *Config) setDefaultValues() error {
+	if cfg.Host == "" {
+		cfg.Host = "localhost"
+		slog.Debug("set default listening host", "host", cfg.Host)
 	}
-	if AuthServerConfig.Port == 0 {
-		AuthServerConfig.Port = 8080
-		slog.Debug("set default listening port", "port", AuthServerConfig.Port)
+	if cfg.Port == 0 {
+		cfg.Port = 8080
+		slog.Debug("set default listening port", "port", cfg.Port)
 	}
-	if AuthServerConfig.Redis.Host == "" {
-		AuthServerConfig.Redis.Host = "localhost"
-		slog.Debug("set default redis address", "port", AuthServerConfig.Redis.Host)
+	if cfg.Redis.Host == "" {
+		cfg.Redis.Host = "localhost"
+		slog.Debug("set default redis host", "host", cfg.Redis.Host)
 	}
-	if AuthServerConfig.Redis.Port == "" {
-		AuthServerConfig.Redis.Port = "6379"
-		slog.Debug("set default redis port", "port", AuthServerConfig.Redis.Port)
+	if cfg.Redis.Port == "" {
+		cfg.Redis.Port = "6379"
+		slog.Debug("set default redis port", "port", cfg.Redis.Port)
 	}
-	if AuthServerConfig.DB == "" {
+	if cfg.DB == "" {
 		// Default PostgreSQL DSN (disable ssl for local dev)
-		AuthServerConfig.DB = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
-		slog.Debug("set default db address", "dsn", AuthServerConfig.DB)
+		cfg.DB = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+		slog.Debug("set default local database address")
 	}
-	if len(AuthServerConfig.JWT) == 0 {
+	if len(cfg.JWT) == 0 {
 		keySize := 2048
 		alg := "RS256"
 		privateKey, err := rsa.GenerateKey(rand.Reader, keySize)
 		if err != nil {
-			panic("failed to generate RSA keys")
+			slog.Error("failed to generate RSA keys", "err", err)
+			return fmt.Errorf("generate RSA keys: %w", err)
 		}
 		privateKeyPEM := pem.EncodeToMemory(&pem.Block{
 			Type:  "RSA PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
 		})
 
-		slog.Info("Generated RSA key pair", "algorithm", alg, "keySize", keySize)
-		AuthServerConfig.JWT = []JWTConfig{
+		slog.Info("Generated RSA key pair", "algorithm", alg, "key_size", keySize)
+		cfg.JWT = []JWTConfig{
 			{
 				Kid: "default",
 				Alg: alg,
@@ -112,17 +119,78 @@ func setDefaultValues() {
 			},
 		}
 	}
-	if AuthServerConfig.Cloudflare.Turnstile.Key == "" || AuthServerConfig.Cloudflare.Turnstile.Secret == "" {
-		panic("Cloudflare Turnstile un-config")
+	cfg.setAdminDefaults()
+	cfg.applyAdminEnvOverrides()
+
+	if cfg.Cloudflare.Turnstile.Key == "" || cfg.Cloudflare.Turnstile.Secret == "" {
+		slog.Error("Cloudflare Turnstile is not configured")
+		return fmt.Errorf("Cloudflare Turnstile is not configured")
+	}
+	return nil
+}
+
+func (cfg *Config) setAdminDefaults() {
+	issuerHost := cfg.Host
+	if issuerHost == "" || issuerHost == "0.0.0.0" || issuerHost == "::" {
+		issuerHost = "localhost"
+	}
+	if cfg.Issuer == "" {
+		cfg.Issuer = fmt.Sprintf("http://%s:%d", issuerHost, cfg.Port)
+	}
+	if cfg.Admin.DisplayName == "" {
+		cfg.Admin.DisplayName = "Auth Server Admin"
+	}
+	if len(cfg.Admin.RedirectURIs) == 0 {
+		cfg.Admin.RedirectURIs = []string{
+			"http://localhost:5173/admin-page/callback",
+			"http://127.0.0.1:5173/admin-page/callback",
+			"http://localhost:8080/admin-page/callback",
+			"http://127.0.0.1:8080/admin-page/callback",
+		}
+	}
+	if len(cfg.Admin.Scopes) == 0 {
+		cfg.Admin.Scopes = []string{"manage:system", "manage:clients"}
+	}
+	if len(cfg.Admin.GrantTypes) == 0 {
+		cfg.Admin.GrantTypes = []string{"authorization_code", "refresh_token"}
 	}
 }
 
-func resolveEnv(cfg *Config) {
-	cfgV := reflect.ValueOf(cfg).Elem()
-	resolveStruct(cfgV)
+func (cfg *Config) applyAdminEnvOverrides() {
+	if v := strings.TrimSpace(os.Getenv("OAUTH_ISSUER")); v != "" {
+		cfg.Issuer = strings.TrimRight(v, "/")
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_DISPLAY_NAME")); v != "" {
+		cfg.Admin.DisplayName = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_REDIRECT_URIS")); v != "" {
+		cfg.Admin.RedirectURIs = splitCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_SCOPES")); v != "" {
+		cfg.Admin.Scopes = splitCSV(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("ADMIN_CLIENT_GRANT_TYPES")); v != "" {
+		cfg.Admin.GrantTypes = splitCSV(v)
+	}
 }
 
-func resolveStruct(v reflect.Value) {
+func splitCSV(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func resolveEnv(cfg *Config) error {
+	cfgV := reflect.ValueOf(cfg).Elem()
+	return resolveStruct(cfgV)
+}
+
+func resolveStruct(v reflect.Value) error {
 	t := v.Type()
 	for i := range v.NumField() {
 		field := v.Field(i)
@@ -130,22 +198,38 @@ func resolveStruct(v reflect.Value) {
 
 		switch field.Kind() {
 		case reflect.String:
-			resolveString(field, fieldType.Name)
+			if err := resolveString(field, fieldType.Name); err != nil {
+				return err
+			}
 		case reflect.Slice:
 			for j := 0; j < field.Len(); j++ {
-				resolveStruct(field.Index(j))
+				element := field.Index(j)
+				if element.Kind() == reflect.Struct {
+					if err := resolveStruct(element); err != nil {
+						return err
+					}
+				}
+				if element.Kind() == reflect.String {
+					if err := resolveString(element, fieldType.Name); err != nil {
+						return err
+					}
+				}
 			}
 		case reflect.Struct:
-			resolveStruct(field)
+			if err := resolveStruct(field); err != nil {
+				return err
+			}
 		default:
 		}
 	}
+	return nil
 }
 
-func resolveString(v reflect.Value, fieldName string) {
+var envPattern = regexp.MustCompile(`\$\{(.+?)(?::(.+?))?}`)
+
+func resolveString(v reflect.Value, fieldName string) error {
 	val := v.String()
-	re := regexp.MustCompile(`\$\{(.+?)(?::(.+?))?}`)
-	matches := re.FindStringSubmatch(val)
+	matches := envPattern.FindStringSubmatch(val)
 
 	if len(matches) > 1 {
 		envKey := matches[1]
@@ -157,10 +241,12 @@ func resolveString(v reflect.Value, fieldName string) {
 		envVal, found := os.LookupEnv(envKey)
 		if !found {
 			if defaultValue == "" {
-				panic(fmt.Sprintf("Environment variable for %s (%s) is not set and no default value is provided", fieldName, envKey))
+				slog.Error("required environment variable not set", "field", fieldName, "env", envKey)
+				return fmt.Errorf("environment variable for %s (%s) is not set and no default value is provided", fieldName, envKey)
 			}
 			envVal = defaultValue
 		}
 		v.SetString(envVal)
 	}
+	return nil
 }

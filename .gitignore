@@ -18,6 +18,9 @@
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
 
+# Go debug binaries
+__debug_bin*
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

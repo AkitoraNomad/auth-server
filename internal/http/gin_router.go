@@ -3,46 +3,63 @@ package http
 import (
 	"auth-server/internal"
 	"auth-server/internal/http/admin"
+	"auth-server/internal/model"
+	"auth-server/internal/webui"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-oauth2/oauth2/v4/server"
-	"github.com/go-session/session/v3"
 )
 
 // CreateGinEngine builds a gin.Engine replacing the previous net/http mux.
 // Gradually wraps existing handler funcs to reduce refactor impact.
-func CreateGinEngine(srv *server.Server) *gin.Engine {
+func CreateGinEngine(srv *server.Server, spaAssets fs.FS) *gin.Engine {
 	r := gin.New()
+	// Forwarded IP headers are untrusted unless an explicit proxy policy is
+	// configured. Authentication limits use the transport peer address.
+	if err := r.SetTrustedProxies(internal.AuthServerConfig.TrustedProxies); err != nil {
+		panic("invalid trusted-proxies configuration")
+	}
 	// discard default gin text logger, we use slog
 	gin.DefaultWriter = io.Discard
 	// ensure panic stack traces are printed to the console
 	gin.DefaultErrorWriter = os.Stderr
 	r.Use(gin.CustomRecovery(func(c *gin.Context, recovered any) {
+		slog.Error("panic recovered", "err", fmt.Sprintf("%v", recovered), "path", c.Request.URL.Path)
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 			"code": 1,
-			"msg":  fmt.Sprintf("%v", recovered),
+			"msg":  "internal server error",
 		})
 	}))
 	r.Use(ginSlogLogger())
-
-	// keep previous session expiration behavior (15 minutes)
-	session.SetExpired(15 * 60)
-	r.Use(func(c *gin.Context) {
-		// touch session to ensure middleware order doesn't break later usage
-		// (lazy start in handlers still works; this is a placeholder for future auth middleware)
-		c.Next()
+	r.Use(securityHeadersMiddleware())
+	r.Use(sameOriginMiddleware())
+	r.Use(bodyLimitMiddleware())
+	r.Use(authRateMiddleware())
+	r.GET("/api/public/admin-config", func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"client_id": fmt.Sprint(internal.AuthServerConfig.Admin.ClientID)})
 	})
 
 	// Root & static placeholder
 	r.GET("/", gin.WrapF(indexHandler))
+
+	// Vendored CSS used by the server-rendered auth pages. Keeping this route
+	// explicit avoids exposing the assets directory and does not depend on a
+	// public CDN.
+	r.GET("/assets/bulma.min.css", func(c *gin.Context) {
+		c.Header("Cache-Control", "public, max-age=86400")
+		c.File("assets/bulma.min.css")
+	})
 
 	// Auth related
 	loginHandler := getLoginHandler()
@@ -54,22 +71,47 @@ func CreateGinEngine(srv *server.Server) *gin.Engine {
 	r.POST(internal.PathToken, gin.WrapF(getTokenHandler(srv)))
 	r.POST(internal.PathIntrospect, gin.WrapF(getIntrospectHandler(srv)))
 	r.POST(internal.PathUserinfo, gin.WrapF(getUserinfoHandler(srv)))
+	r.GET(internal.PathUserinfo, gin.WrapF(getUserinfoHandler(srv)))
+	r.GET("/logout", gin.WrapF(getLogoutHandler(srv)))
+	r.POST("/logout", gin.WrapF(getLogoutHandler(srv)))
+	r.GET(internal.PathDiscovery, gin.WrapF(discoveryHandler))
 	r.GET(internal.PathJwkSet, gin.WrapF(jwkSetHandler))
 	r.GET(internal.PathRegistration, gin.WrapF(getRegistrationHandler(srv)))
 	r.POST(internal.PathRegistration, gin.WrapF(getRegistrationHandler(srv)))
 
-	// Admin routes
-	adminGroup := r.Group("/admin")
-	adminGroup.Use(admin.AuthMiddleware())
+	// Admin JSON API. RequireAdmin verifies the JWT, the management client, the
+	// Redis revocation state and auth_admin membership. Each route then enforces
+	// its own management scope.
+	apiAdmin := r.Group("/api/admin")
+	apiAdmin.Use(admin.RequireAdmin(srv.Manager))
+	apiAdmin.Use(admin.RequireRecentAuthentication(srv.Manager))
 	{
-		adminGroup.GET("/client", gin.WrapF(admin.GetClients()))
-		adminGroup.POST("/client/new", gin.WrapF(admin.PostClientNew()))
-		adminGroup.POST("/client/del", gin.WrapF(admin.PostClientDel()))
+		apiAdmin.GET("/me", admin.GetMeAPI())
 
-		adminGroup.GET("/accounts", gin.WrapF(admin.GetAccounts()))
-		adminGroup.POST("/accounts/new", gin.WrapF(admin.PostAccountNew()))
-		adminGroup.POST("/accounts/del", gin.WrapF(admin.PostAccountDel()))
+		apiAdmin.GET("/users", admin.RequireScope(model.ScopeManageSystem), admin.GetUsersAPI())
+		apiAdmin.POST("/users", admin.RequireScope(model.ScopeManageSystem), admin.PostUserAPI())
+		apiAdmin.PATCH("/users/:id", admin.RequireScope(model.ScopeManageSystem), admin.PatchUserAPI())
+		apiAdmin.POST("/users/:id/password", admin.RequireScope(model.ScopeManageSystem), admin.ResetUserPasswordAPI())
+		apiAdmin.DELETE("/users/:id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteUserAPI())
+
+		apiAdmin.GET("/clients", admin.RequireScope(model.ScopeManageClients), admin.GetClientsAPI())
+		apiAdmin.POST("/clients", admin.RequireScope(model.ScopeManageClients), admin.PostClientAPI())
+		apiAdmin.PUT("/clients/:id", admin.RequireScope(model.ScopeManageClients), admin.PutClientAPI())
+		apiAdmin.PATCH("/clients/:id/state", admin.RequireScope(model.ScopeManageClients), admin.PatchClientStateAPI())
+		apiAdmin.POST("/clients/:id/secret", admin.RequireScope(model.ScopeManageClients), admin.ResetClientSecretAPI())
+		apiAdmin.DELETE("/clients/:id", admin.RequireScope(model.ScopeManageClients), admin.DeleteClientAPI())
+
+		apiAdmin.GET("/admins", admin.RequireScope(model.ScopeManageSystem), admin.GetAdminsAPI())
+		apiAdmin.POST("/admins", admin.RequireScope(model.ScopeManageSystem), admin.PostAdminAPI())
+		apiAdmin.DELETE("/admins/:user_id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteAdminAPI())
+
+		apiAdmin.GET("/sessions", admin.RequireScope(model.ScopeManageSystem), admin.GetSessionsAPI(srv.Manager))
+		apiAdmin.DELETE("/sessions/:user_id", admin.RequireScope(model.ScopeManageSystem), admin.DeleteSessionAPI(srv.Manager))
 	}
+
+	// Embedded management SPA. Register is a no-op unless the binary was built
+	// with -tags embedspa; OAuth2 and /api routes are not affected.
+	webui.Register(r, spaAssets)
 
 	// 404 fallback
 	r.NoRoute(func(c *gin.Context) {
@@ -97,7 +139,7 @@ func ginSlogLogger() gin.HandlerFunc {
 			errMsg = c.Errors.String()
 		}
 		if rawQuery != "" {
-			path = path + "?" + rawQuery
+			path = path + "?" + sanitizeQuery(rawQuery)
 		}
 		level := slog.LevelInfo
 		if status >= 500 {
@@ -140,4 +182,32 @@ func compactUA(ua string) (short string, hash string, length int) {
 		short = ua
 	}
 	return
+}
+
+var sensitiveQueryKeys = map[string]struct{}{
+	"state":          {},
+	"code":           {},
+	"code_challenge": {},
+	"code_verifier":  {},
+	"access_token":   {},
+	"refresh_token":  {},
+	"token":          {},
+	"client_secret":  {},
+	"password":       {},
+	"cf_token":       {},
+}
+
+// sanitizeQuery keeps useful routing/debug parameters while redacting values
+// that must not be written to logs (state, PKCE material, credentials/tokens).
+func sanitizeQuery(rawQuery string) string {
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "[unparseable query redacted]"
+	}
+	for key := range sensitiveQueryKeys {
+		if values.Has(key) {
+			values.Set(key, "[redacted]")
+		}
+	}
+	return values.Encode()
 }

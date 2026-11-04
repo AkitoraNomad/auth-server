@@ -3,16 +3,20 @@ package http
 import (
 	"auth-server/internal"
 	"auth-server/internal/model"
+	authoauth2 "auth-server/internal/oauth2"
+	"auth-server/internal/password"
 	"auth-server/internal/render"
 	storeImpl "auth-server/internal/store"
 	"auth-server/internal/util"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
-
-	"fmt"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-session/session/v3"
@@ -23,7 +27,7 @@ type loginReq struct {
 	LoginKey     string              `json:"login_key,omitempty"`
 	Data         json.RawMessage     `json:"data,omitempty"`
 	CfToken      string              `json:"cf_token,omitempty"`
-	Next         string              `json:"next,omitempty"`
+	RequestID    string              `json:"request_id,omitempty"`
 }
 
 func getLoginHandler() gin.HandlerFunc {
@@ -45,68 +49,64 @@ func getLoginHandler() gin.HandlerFunc {
 	}
 }
 
-func isValidNext(next string) bool {
-	return next == internal.NextAuth || next == internal.NextAdmin
-}
-
 func handleLoginPage(c *gin.Context, s session.Store) {
-	next := c.Query("next")
-	if !isValidNext(next) {
-		c.String(http.StatusBadRequest, "invalid_param")
+	requestID := c.Query("request_id")
+	if requestID == "" {
+		requestID = activeAuthorizeRequestID(s)
+	}
+	state := findAuthorizeRequest(s, requestID)
+	if state == nil {
+		writeAuthorizeError(c.Writer, "invalid_request", "authorization request not found or expired")
 		return
 	}
-	s.Set(internal.SessionKeyNext, next)
+	setActiveAuthorizeRequest(s, state.ID)
+
+	nextURL := internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
+	if currentSessionUser(c.Request.Context(), s) != nil {
+		_ = s.Save()
+		c.Redirect(http.StatusFound, nextURL)
+		return
+	}
+
+	clientInfo, err := storeImpl.ClientRepo.GetByID(c.Request.Context(), state.ClientID)
+	if err != nil {
+		slog.Error("failed to load login client", "client_id", state.ClientID, "err", err)
+		c.String(http.StatusInternalServerError, "failed to get client info")
+		return
+	}
+	client, ok := clientInfo.(*model.AuthClient)
+	if !ok || client == nil {
+		writeAuthorizeError(c.Writer, "invalid_request", "unknown client")
+		return
+	}
+
 	if err := s.Save(); err != nil {
-		c.String(http.StatusInternalServerError, fmt.Sprintf("failed to save session: %v", err))
+		c.String(http.StatusInternalServerError, "failed to save session")
 		return
 	}
-	if next == internal.NextAdmin {
-		handleAdminLoginPage(c, s)
-	} else {
-		handleAuthLoginPage(c, s)
-	}
-}
-
-func handleAuthLoginPage(c *gin.Context, s session.Store) {
-	if _, ok := s.Get(internal.SessionKeyUserID); ok {
-		c.Redirect(http.StatusFound, internal.PathAuth)
+	token, err := csrfToken(s)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
 		return
 	}
-	cid, ok := s.Get(internal.SessionKeyClientID)
-	if !ok {
-		c.String(http.StatusBadRequest, "invalid_request")
-		return
-	}
-	if err := renderLoginPage(c.Writer, cid.(string), http.StatusUnauthorized, nil, false); err != nil {
+	if err := renderLoginPage(c.Writer, client.DisplayName, nextURL, state.ID, token, http.StatusUnauthorized, nil); err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
-	}
-}
-
-func handleAdminLoginPage(c *gin.Context, s session.Store) {
-	// If already logged in and has admin role, go straight to admin clients page
-	if v, ok := s.Get(internal.SessionKeyUserID); ok {
-		if su, err := util.MapToStruct[*model.SessionUserInfo](v.(map[string]any)); err == nil {
-			if su.User.HasRole("admin") {
-				c.Redirect(http.StatusFound, internal.PathAdminClients)
-				return
-			} else {
-				slog.Warn("user without admin role attempted to access admin panel", "user_id", su.User.ID)
-				// those without admin role will still see the login page and clean up session below
-				_ = s.Flush()
-				_ = s.Save()
-			}
-		} else {
-			slog.Error("failed to map session user info", "err", err)
-		}
-	}
-	// Render the same login page but without requiring clientId, and with admin-specific title
-	if err := renderLoginPage(c.Writer, "Admin Panel", http.StatusUnauthorized, nil, true); err != nil {
-		c.String(http.StatusInternalServerError, err.Error())
-		return
 	}
 }
 
 func handleJsonLogin(c *gin.Context, s session.Store) {
+	if validateCSRF(c.Request, s) != nil {
+		c.AbortWithStatus(http.StatusForbidden)
+		return
+	}
+	if currentSessionUser(c.Request.Context(), s) != nil {
+		c.AbortWithStatus(http.StatusConflict)
+		return
+	}
+	if strings.ToLower(c.ContentType()) != "application/json" {
+		responseJson(c.Writer, 1, "invalid_request_body")
+		return
+	}
 	req := loginReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		responseJson(c.Writer, 1, "invalid_request_body")
@@ -116,61 +116,145 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		responseJson(c.Writer, 1, "invalid_request")
 		return
 	}
+	if !allowAuthAttempt(c.Request.Context(), "account:"+req.ProviderType.String()+":"+strings.ToLower(req.LoginKey), 10) {
+		c.Header("Retry-After", "60")
+		c.Status(http.StatusTooManyRequests)
+		return
+	}
 	remoteIp := getIp(c.Request)
-	if err := verifyRequest(req.CfToken, remoteIp); err != nil {
-		slog.Warn("failed to verify request", "user_addr", remoteIp)
+	if err := verifyRequest(c.Request.Context(), req.CfToken, remoteIp); err != nil {
+		slog.Warn("failed to verify request", "ip", remoteIp)
 		responseJson(c.Writer, 1, "turnstile_verification_failed")
 		return
 	}
 	userInfo, err := storeImpl.UserRepo.GetUserByCredentials(req.LoginKey, req.ProviderType, req.Data, s)
 	if err != nil {
-		slog.Warn("failed to verify credentials", "loginKey", req.LoginKey, "provider", req.ProviderType, "err", err)
+		slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", err)
+		responseJson(c.Writer, 1, "invalid_credentials")
+		return
+	}
+	if userInfo != nil && userInfo.IsDisabled {
 		responseJson(c.Writer, 1, "invalid_credentials")
 		return
 	}
 	if userInfo == nil {
-		slog.Warn("unregistered credential", "loginKey", req.LoginKey, "provider", req.ProviderType)
-		if *req.ProviderType == model.ProviderTelegram {
-			if err := saveTelegramSessionOnUnregistered(req.Data, s); err != nil {
-				responseJson(c.Writer, 1, err.Error())
-				return
-			}
+		// Email/password failures must be indistinguishable from a wrong
+		// password, including timing. Telegram unregistered users still need
+		// the registration continuation flow.
+		if *req.ProviderType == model.ProviderEmailPassword {
+			dummy := model.EmailPasswordProviderData{}
+			_ = json.Unmarshal(req.Data, &dummy)
+			password.DummyVerify(dummy.Password)
+			slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", "invalid_credentials")
+			responseJson(c.Writer, 1, "invalid_credentials")
+			return
+		}
+		slog.Warn("unregistered credential", "provider", req.ProviderType)
+		if err := saveTelegramSessionOnUnregistered(req.Data, s); err != nil {
+			responseJson(c.Writer, 1, err.Error())
+			return
 		}
 		responseJson(c.Writer, 0, map[string]any{"user": nil})
 		return
 	}
-	var clientID string
-	if cid, ok := s.Get(internal.SessionKeyClientID); ok {
-		if v, ok := cid.(string); ok {
-			clientID = v
-		}
+
+	clientID := ""
+	nextURL := ""
+	requestID := req.RequestID
+	if requestID == "" {
+		requestID = activeAuthorizeRequestID(s)
+	}
+	if state := findAuthorizeRequest(s, requestID); state != nil {
+		clientID = state.ClientID
+		nextURL = internal.PathAuth + "?request_id=" + url.QueryEscape(state.ID)
+		setActiveAuthorizeRequest(s, state.ID)
+	}
+	// Rotate the session identifier after successful authentication to close
+	// session fixation. Refresh copies the pending OAuth authorization state.
+	version, err := authoauth2.UserSessionVersion(c.Request.Context(), strconv.FormatInt(userInfo.ID, 10))
+	if err != nil {
+		c.Status(http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.Save(); err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	if rotated, err := session.Refresh(c.Request.Context(), c.Writer, c.Request); err == nil {
+		s = rotated
+	} else {
+		slog.Warn("failed to rotate session after login", "err", err)
+		c.Status(http.StatusInternalServerError)
+		return
 	}
 	sessionUser := model.NewSessionUserInfo(userInfo, req.ProviderType, remoteIp, clientID, time.Now(), map[string]any{
 		"login_key": req.LoginKey,
 	})
+	sessionUser.AuthVersion = version
+	s.Delete(csrfSessionKey)
 	s.Set(internal.SessionKeyUserID, sessionUser)
 	if err := s.Save(); err != nil {
 		responseJson(c.Writer, 1, err)
 		return
 	}
-	responseJson(c.Writer, 0, map[string]any{"user": sessionUser.User})
+	if err := storeImpl.UserRepo.UpdateLastLogin(userInfo.ID); err != nil {
+		slog.Warn("failed to update last login", "user_id", userInfo.ID, "err", err)
+	}
+	responseJson(c.Writer, 0, map[string]any{
+		"user":     sessionUser.User,
+		"next_url": nextURL,
+	})
 }
 
 func getIp(r *http.Request) string {
-	remoteIp := r.Header.Get("CF-Connecting-IP")
-	if remoteIp == "" {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		remoteIp = host
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	return remoteIp
+	if !trustedProxy(host) {
+		return host
+	}
+	forwarded := r.Header.Get("X-Forwarded-For")
+	if forwarded == "" || len(forwarded) > 4096 {
+		return host
+	}
+	chain := strings.Split(forwarded, ",")
+	for i := len(chain) - 1; i >= 0; i-- {
+		ip := strings.TrimSpace(chain[i])
+		if net.ParseIP(ip) == nil {
+			return host
+		}
+		if i == 0 || !trustedProxy(ip) {
+			return ip
+		}
+	}
+	return host
 }
 
-func renderLoginPage(w http.ResponseWriter, clientName string, code int, err error, showAdminNav bool) error {
+func trustedProxy(address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	for _, value := range internal.AuthServerConfig.TrustedProxies {
+		if candidate := net.ParseIP(value); candidate != nil && candidate.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(value); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderLoginPage(w http.ResponseWriter, clientName, nextURL, requestID, csrf string, code int, err error) error {
 	data := map[string]any{
-		"client_name":  clientName,
-		"site_key":     internal.AuthServerConfig.Cloudflare.Turnstile.Key,
-		"bot_name":     internal.AuthServerConfig.Telegram.BotName,
-		"ShowAdminNav": showAdminNav,
+		"client_name": clientName,
+		"next_url":    nextURL,
+		"request_id":  requestID,
+		"csrf_token":  csrf,
+		"site_key":    internal.AuthServerConfig.Cloudflare.Turnstile.Key,
+		"bot_name":    internal.AuthServerConfig.Telegram.BotName,
 	}
 	if err != nil {
 		data["err"] = err
@@ -181,14 +265,22 @@ func renderLoginPage(w http.ResponseWriter, clientName string, code int, err err
 // saveTelegramSessionOnUnregistered validates Telegram credential and stores it into session
 // so that the registration flow can proceed. It mirrors the previous inline logic.
 func saveTelegramSessionOnUnregistered(tgData json.RawMessage, s session.Store) error {
+	if internal.AuthServerConfig.Telegram.BotToken == "" {
+		return fmt.Errorf("telegram login is disabled")
+	}
 	botTokenDigest := util.DigestSHA256(internal.AuthServerConfig.Telegram.BotToken)
-	if !util.ValidateTelegramCredential(tgData, botTokenDigest) {
-		slog.Warn("Invalid Telegram Credentials")
+	tg, err := util.ParseTelegramCredential(tgData, botTokenDigest, time.Now())
+	if err != nil {
+		slog.Warn("invalid telegram credential", "err", err)
 		return fmt.Errorf("invalid_telegram_credentials")
 	}
-	var tgUser model.TelegramUser
-	if err := json.Unmarshal(tgData, &tgUser); err != nil {
-		return err
+	tgUser := model.TelegramUser{
+		Id:        tg.ID,
+		FirstName: tg.FirstName,
+		LastName:  tg.LastName,
+		Username:  tg.Username,
+		PhotoUrl:  tg.PhotoURL,
+		AuthDate:  tg.AuthDate,
 	}
 	s.Set(internal.SessionKeyTelegramData, tgUser)
 	if err := s.Save(); err != nil {

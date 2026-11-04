@@ -1,0 +1,118 @@
+flowchart TD
+    %% ===================== ① SPA / 浏览器 =====================
+    subgraph SPA["① 管理 SPA / 浏览器（public client，无 secret）"]
+        direction TB
+        S0([打开 /admin-page]) --> S1{内存中有<br/>Access Token？}
+        S1 -->|有| S13["携带 Bearer<br/>调用 /api/admin/*"]
+        S1 -->|无| S2["生成 PKCE verifier/state<br/>计算 S256 challenge<br/>scope=manage:system manage:clients"]
+        S2 --> S3["GET /oauth2/authorize<br/>client_id=2 + redirect_uri + PKCE"]
+        S9["用户在同意页提交<br/>POST /oauth2/authorize<br/>consent=1 + consented Scope"]
+        S10["回调 /admin-page/callback<br/>校验 state / pending 请求 / TTL"]
+        S10b{"code 与 state 校验通过？"}
+        S11["POST /oauth2/token<br/>client_id + code_verifier + redirect_uri"]
+        S12["Access / Refresh Token<br/>仅保存在内存"]
+        S13["携带 Bearer<br/>调用 /api/admin/*"]
+        S14["401 → 用 refresh_token 续期<br/>失败 → 重新走授权"]
+    end
+
+    %% ===================== ② Auth Server =====================
+    subgraph AS["② Auth Server（Gin + go-oauth2）"]
+        direction TB
+        A0["getAuthorizeHandler<br/>首次授权请求"]
+        A1["ValidationAuthorizeRequest<br/>校验 response_type / PKCE"]
+        A2["加载 client<br/>精确校验 redirect_uri<br/>校验 grant_types / Scope 白名单"]
+        A3{"请求合法？"}
+        A4["保存 authorizeRequestState<br/>到 session，TTL 10 分钟"]
+        A5{"用户已登录？"}
+        A6["登录页 /login<br/>Turnstile + 邮箱密码<br/>验证后写登录 session"]
+        A7["GET /auth?request_id<br/>从 state 渲染同意页"]
+        A8["handleConsentSubmission<br/>找回 state / 校验隐藏字段<br/>重新校验 client 配置"]
+        A9{"用户允许？"}
+        A10["保存 per-request consent<br/>srv.HandleAuthorizeRequest<br/>PKCE 校验 + 生成 code"]
+        A11["302 回调 redirect_uri<br/>?code=...&state=..."]
+        A12["token endpoint<br/>public client + code / PKCE 校验"]
+        A13["签发 JWT Access Token<br/>+ Refresh Token"]
+        A14["RequireAdmin<br/>JWT 验签<br/>校验 iss / aud / sub / scope"]
+        A15["LoadAccessToken<br/>Redis 撤销 / 过期检查"]
+        A16["client_id=2 且 auth_admin(user)<br/>校验路由所需 Scope"]
+        A17{"鉴权通过？"}
+        A18["执行 API Handler<br/>查询 PostgreSQL"]
+        A19([200 JSON])
+        A20([400 invalid_request / invalid_scope])
+        A21([302 access_denied])
+        A22([401 Unauthorized / 403 Forbidden])
+    end
+
+    %% ===================== ③ 数据层 =====================
+    subgraph DATA["③ 数据层"]
+        direction TB
+        R1[("Redis<br/>登录 session / authorizeRequestState")]
+        R2[("Redis<br/>consentByRequest / auth code")]
+        R3[("Redis<br/>access / refresh token store")]
+        P1[("PostgreSQL<br/>auth_client / auth_user<br/>auth_admin / auth_user_provider")]
+    end
+
+    %% ===================== 授权阶段 =====================
+    S3 --> A0
+    A0 --> A1 --> A2 --> A3
+    A3 -->|否| A20
+    A3 -->|是| A4 --> A5
+    A4 -.-> R1
+    A2 -.-> P1
+
+    A5 -->|否| A6 --> A7
+    A5 -->|是| A7
+    A6 -.-> P1
+
+    A7 --> S9 --> A8
+    A8 --> A9
+    A9 -->|否| A21
+    A9 -->|是| A10 --> A11 --> S10
+    A10 -.-> R2
+
+    A21 -.->|error| S10
+    S10 --> S10b
+    S10b -->|否| S2
+    S10b -->|是| S11 --> A12
+    S11 -.-> R2
+    A12 --> A13 --> S12
+    A13 -.-> R3
+
+    %% ===================== 管理 API 阶段 =====================
+    S12 --> S13
+    S13 --> A14 --> A15 --> A16 --> A17
+    A14 -.-> R3
+    A15 -.-> R3
+    A16 -.-> P1
+    A17 -->|否| A22
+    A17 -->|是| A18 --> A19
+
+    %% ===================== 续期 / 失效 =====================
+    S13 -.->|401| S14
+    A22 -.->|401 可续期；403 提示| S14
+    S14 -.->|refresh_token| A12
+    S14 -.->|失败| S2
+
+    N1["即时失效：<br/>删除 auth_admin 记录 → 下一请求 403<br/>删除 Redis token → 下一请求 401"]
+    A15 -.-> N1
+    A16 -.-> N1
+
+    %% ===================== 样式 =====================
+    classDef start fill:#1e293b,stroke:#0f172a,color:#ffffff;
+    classDef spa fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e;
+    classDef server fill:#dcfce7,stroke:#16a34a,color:#14532d;
+    classDef data fill:#fef3c7,stroke:#d97706,color:#78350f;
+    classDef decision fill:#fef9c3,stroke:#ca8a04,color:#713f12;
+    classDef ok fill:#bbf7d0,stroke:#15803d,color:#14532d;
+    classDef error fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    classDef note fill:#f1f5f9,stroke:#94a3b8,color:#334155;
+
+    class S0 start;
+    class S2,S3,S9,S10,S11,S12,S13,S14 spa;
+    class S1,S10b decision;
+    class A0,A1,A2,A4,A6,A7,A8,A10,A11,A12,A13,A14,A15,A16,A18 server;
+    class A3,A5,A9,A17 decision;
+    class A19 ok;
+    class A20,A21,A22 error;
+    class R1,R2,R3,P1 data;
+    class N1 note;
