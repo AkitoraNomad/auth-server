@@ -27,10 +27,18 @@ with sync_playwright() as p:
     page.route('https://telegram.org/**', lambda route: route.abort())
     page.route('https://cdn.bootcss.com/**', lambda route: route.abort())
 
-    def sign_in(scopes=('manage:system', 'manage:clients')):
+    def sign_in(scopes=('manage:system', 'manage:clients'), check_invalid=False):
         page.goto(origin + '/admin-page/users')
         page.wait_for_url(re.compile(r'/(login|auth)\?'))
         if '/login' in page.url and not '/admin-page/login' in page.url:
+            if check_invalid:
+                page.locator('#email').fill(os.environ['AUTH_TEST_EMAIL'])
+                page.locator('#password').fill('definitely-not-the-password')
+                page.evaluate("turnstileCallback('regression-fixture')")
+                page.locator('#loginBtn').click()
+                expect(page.locator('#msgDiv')).to_contain_text('Login failed. Check your credentials and try again.')
+                expect(page.locator('#msgDiv')).not_to_contain_text('Network error')
+                passed('invalid credentials show a login error, not a network error')
             page.locator('#email').fill(os.environ['AUTH_TEST_EMAIL'])
             page.locator('#password').fill(os.environ['AUTH_TEST_PASSWORD'])
             page.evaluate("turnstileCallback('regression-fixture')")
@@ -41,7 +49,7 @@ with sync_playwright() as p:
         page.get_by_role('button', name='Allow access').click()
         page.wait_for_url('**/admin-page/users')
 
-    sign_in()
+    sign_in(check_invalid=True)
     expect(page.get_by_role('heading', name='Users', exact=True)).to_be_visible()
     expect(page.get_by_role('cell', name=os.environ['AUTH_TEST_EMAIL'], exact=True)).to_be_visible()
     passed('real password login, S256 callback, deep-link return and user list')
