@@ -66,7 +66,7 @@ func handleJsonReg(w http.ResponseWriter, r *http.Request, s session.Store) {
 	req := regReq{}
 	if err = json.Unmarshal(body, &req); err != nil {
 		slog.Error("failed to unmarshal registration request", "err", err, "ip", ip)
-		responseJson(w, 1, err)
+		responseJsonWithStatus(w, http.StatusBadRequest, 1, "invalid_request_body")
 		return
 	}
 	if req.ProviderType != model.ProviderTelegram {
@@ -75,13 +75,13 @@ func handleJsonReg(w http.ResponseWriter, r *http.Request, s session.Store) {
 	}
 	if err = verifyRequest(r.Context(), req.CfToken, ip); err != nil {
 		slog.Warn("failed to verify turnstile request", "err", err, "ip", ip)
-		responseJson(w, 1, "failed to verify turnstile request")
+		responseJsonWithStatus(w, http.StatusBadRequest, 1, "failed to verify turnstile request")
 		return
 	}
 	tgData, ok := s.Get(internal.SessionKeyTelegramData)
 	if !ok {
 		slog.Warn("failed to read telegram user data from session", "ip", ip)
-		responseJson(w, 1, "failed to read user data")
+		responseJsonWithStatus(w, http.StatusBadRequest, 1, "failed to read user data")
 		return
 	}
 	tgUserMap, ok := tgData.(map[string]any)
@@ -108,7 +108,7 @@ func handleJsonReg(w http.ResponseWriter, r *http.Request, s session.Store) {
 	}
 	if erd.Email == "" {
 		slog.Warn("email is missing in registration data", "ip", ip)
-		responseJson(w, 1, "email is required")
+		responseJsonWithStatus(w, http.StatusBadRequest, 1, "email is required")
 		return
 	}
 	erd.Email = strings.ToLower(strings.TrimSpace(erd.Email))

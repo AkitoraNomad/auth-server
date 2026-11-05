@@ -40,11 +40,15 @@ func verifyRequest(ctx context.Context, token, ip string) error {
 }
 
 func responseJson(w http.ResponseWriter, code int, data any) {
-	w.Header().Set("Content-Type", "application/json")
-	if code == 0 {
-		w.WriteHeader(http.StatusOK)
-	} else {
-		w.WriteHeader(http.StatusInternalServerError)
+	status := http.StatusOK
+	if code != 0 {
+		status = http.StatusInternalServerError
 	}
+	responseJsonWithStatus(w, status, code, data)
+}
+
+func responseJsonWithStatus(w http.ResponseWriter, status, code int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": code, "data": data})
 }

@@ -117,6 +117,17 @@
             container.append(alert);
         }
 
+        function regErrorMessage(data) {
+            switch (data) {
+                case "failed to verify turnstile request":
+                    return "人机验证失败，请重试。";
+                case "email is required":
+                    return "请输入邮箱地址。";
+                default:
+                    return "注册失败，请稍后重试。";
+            }
+        }
+
         document.getElementById("RegForm").addEventListener("submit", (event) => {
             const form = event.target;
             if (!form.checkValidity()) {
@@ -140,28 +151,49 @@
             });
         });
 
-        function regReq(body) {
+        async function regReq(body) {
             setSubmitDisabled(true);
-            return fetch("/registration", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "X-CSRF-Token": {{.csrf_token}} },
-                body: JSON.stringify(body)
-            }).then(async response => {
-                if (!response.ok) {
-                    throw new Error("HTTP " + response.status);
+            try {
+                let response;
+                try {
+                    response = await fetch("/registration", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "X-CSRF-Token": {{.csrf_token}} },
+                        body: JSON.stringify(body)
+                    });
+                } catch (error) {
+                    showErrorMessage("网络错误，请稍后重试。");
+                    return;
                 }
-                return response.json();
-            }).then(payload => {
+
+                if (response.status === 429) {
+                    showErrorMessage("操作过于频繁，请稍后再试。");
+                    return;
+                }
+                if (response.status === 403) {
+                    showErrorMessage("请求被拒绝，请刷新后重试。");
+                    return;
+                }
+
+                // Business failures are JSON envelopes even when the status is
+                // non-2xx. Parse the body first so they are not misreported as
+                // network failures.
+                const raw = await response.text();
+                let payload;
+                try {
+                    payload = JSON.parse(raw);
+                } catch (error) {
+                    showErrorMessage("注册失败，请稍后重试。");
+                    return;
+                }
                 if (payload.code === 0) {
                     window.location.replace("/login");
                     return;
                 }
-                showErrorMessage("注册失败，请稍后重试。");
-            }).catch(() => {
-                showErrorMessage("网络错误，请稍后重试。");
-            }).finally(() => {
+                showErrorMessage(regErrorMessage(payload.data));
+            } finally {
                 setSubmitDisabled(false);
-            });
+            }
         }
     </script>
 </body>

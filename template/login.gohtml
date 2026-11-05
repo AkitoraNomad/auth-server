@@ -180,6 +180,22 @@
         }
 
         /**
+         * @param {unknown} data
+         * @returns {string}
+         */
+        function loginErrorMessage(data) {
+            switch (data) {
+                case "turnstile_verification_failed":
+                    return "Verification failed. Please complete the challenge and try again.";
+                case "invalid_request":
+                case "invalid_request_body":
+                    return "Sign-in request was invalid. Please refresh the page and try again.";
+                default:
+                    return "Login failed. Check your credentials and try again.";
+            }
+        }
+
+        /**
          * @param {boolean} open
          */
         function toggleTelegramModal(open) {
@@ -212,6 +228,10 @@
                     return;
                 }
                 if (payload.code !== 0) {
+                    showErrorMessage(loginErrorMessage(payload.data));
+                    return;
+                }
+                if (!payload.data) {
                     showErrorMessage("Login failed. Please try again.");
                     return;
                 }
@@ -255,8 +275,8 @@
                         return;
                     }
                     if (payload.code !== 0) {
-                        showErrorMessage("Login failed. Check your credentials and try again.");
-                    } else if (!payload.data.user) {
+                        showErrorMessage(loginErrorMessage(payload.data));
+                    } else if (!payload.data || !payload.data.user) {
                         showErrorMessage("Invalid credentials.");
                     } else {
                         handleRedirect(payload.data.user, payload.data.next_url);
@@ -265,22 +285,43 @@
                 .finally(() => setLoginBtnDisable(false));
         });
 
-        function loginReq(body) {
+        async function loginReq(body) {
             const requestId = document.getElementById('loginForm').dataset.requestId;
             body.request_id = requestId || undefined;
-            return fetch("/login", {
-                method: "POST",
-                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': {{.csrf_token}} },
-                body: JSON.stringify(body)
-            }).then(async response => {
-                if (!response.ok) {
-                    throw new Error("HTTP " + response.status);
-                }
-                return response.json();
-            }).catch(() => {
+
+            let response;
+            try {
+                response = await fetch("/login", {
+                    method: "POST",
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': {{.csrf_token}} },
+                    body: JSON.stringify(body)
+                });
+            } catch (error) {
                 showErrorMessage("Network error. Please try again.");
                 return null;
-            });
+            }
+
+            if (response.status === 429) {
+                showErrorMessage("Too many attempts. Please wait a minute and try again.");
+                return null;
+            }
+            if (response.status === 403) {
+                showErrorMessage("Your sign-in request was rejected. Please refresh the page and try again.");
+                return null;
+            }
+
+            // The server reports business failures (invalid credentials,
+            // failed Turnstile verification, malformed requests) as a JSON
+            // envelope with a non-2xx status. Parse the body regardless of
+            // response.ok so a valid server response is never misreported as
+            // a network error.
+            const raw = await response.text();
+            try {
+                return JSON.parse(raw);
+            } catch (error) {
+                showErrorMessage("Login failed. Please try again.");
+                return null;
+            }
         }
     </script>
 </body>

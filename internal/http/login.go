@@ -104,16 +104,16 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 		return
 	}
 	if strings.ToLower(c.ContentType()) != "application/json" {
-		responseJson(c.Writer, 1, "invalid_request_body")
+		responseJsonWithStatus(c.Writer, http.StatusBadRequest, 1, "invalid_request_body")
 		return
 	}
 	req := loginReq{}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		responseJson(c.Writer, 1, "invalid_request_body")
+		responseJsonWithStatus(c.Writer, http.StatusBadRequest, 1, "invalid_request_body")
 		return
 	}
 	if req.ProviderType == nil || req.LoginKey == "" {
-		responseJson(c.Writer, 1, "invalid_request")
+		responseJsonWithStatus(c.Writer, http.StatusBadRequest, 1, "invalid_request")
 		return
 	}
 	if !allowAuthAttempt(c.Request.Context(), "account:"+req.ProviderType.String()+":"+strings.ToLower(req.LoginKey), 10) {
@@ -124,17 +124,17 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 	remoteIp := getIp(c.Request)
 	if err := verifyRequest(c.Request.Context(), req.CfToken, remoteIp); err != nil {
 		slog.Warn("failed to verify request", "ip", remoteIp)
-		responseJson(c.Writer, 1, "turnstile_verification_failed")
+		responseJsonWithStatus(c.Writer, http.StatusBadRequest, 1, "turnstile_verification_failed")
 		return
 	}
 	userInfo, err := storeImpl.UserRepo.GetUserByCredentials(req.LoginKey, req.ProviderType, req.Data, s)
 	if err != nil {
 		slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", err)
-		responseJson(c.Writer, 1, "invalid_credentials")
+		responseJsonWithStatus(c.Writer, http.StatusUnauthorized, 1, "invalid_credentials")
 		return
 	}
 	if userInfo != nil && userInfo.IsDisabled {
-		responseJson(c.Writer, 1, "invalid_credentials")
+		responseJsonWithStatus(c.Writer, http.StatusUnauthorized, 1, "invalid_credentials")
 		return
 	}
 	if userInfo == nil {
@@ -146,7 +146,7 @@ func handleJsonLogin(c *gin.Context, s session.Store) {
 			_ = json.Unmarshal(req.Data, &dummy)
 			password.DummyVerify(dummy.Password)
 			slog.Warn("failed to verify credentials", "provider", req.ProviderType, "err", "invalid_credentials")
-			responseJson(c.Writer, 1, "invalid_credentials")
+			responseJsonWithStatus(c.Writer, http.StatusUnauthorized, 1, "invalid_credentials")
 			return
 		}
 		slog.Warn("unregistered credential", "provider", req.ProviderType)
